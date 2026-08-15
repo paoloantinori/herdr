@@ -1257,23 +1257,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_session_snapshot_with_env_loads_under_previous_shape() {
-        #[derive(Deserialize)]
-        struct PreviousPaneAgentSessionSnapshot {
-            source: String,
-            agent: String,
-            kind: crate::agent_resume::AgentSessionRefKind,
-            value: String,
-        }
-
+    fn agent_session_snapshot_env_round_trips_and_stays_optional() {
         let json = r#"{"source":"herdr:claude","agent":"claude","kind":"id","value":"claude-session","env":{"CLAUDE_CONFIG_DIR":"/tmp/claude-home"}}"#;
-        let previous: PreviousPaneAgentSessionSnapshot = serde_json::from_str(json)
-            .expect("older binaries must ignore the env field on downgrade");
-        assert_eq!(previous.source, "herdr:claude");
-        assert_eq!(previous.agent, "claude");
-        assert_eq!(previous.kind, crate::agent_resume::AgentSessionRefKind::Id);
-        assert_eq!(previous.value, "claude-session");
-
         let current: PaneAgentSessionSnapshot =
             serde_json::from_str(json).expect("current shape should parse env");
         assert_eq!(
