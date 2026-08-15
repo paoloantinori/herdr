@@ -805,4 +805,47 @@ mod tests {
         );
         assert_eq!(shell_command_from_argv(&[]), None);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_command_from_resume_plan_shell_quotes_reported_env() {
+        let mut session_ref =
+            crate::agent_resume::AgentSessionRef::id("96016622-2d77-4be2-bd66-58c876973caa")
+                .unwrap();
+        session_ref.env = std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/home/u/.cc-mirror/zai/config".to_string(),
+        )]);
+        let with_env = crate::agent_resume::plan("herdr:claude", "claude", &session_ref)
+            .expect("claude session with env should plan");
+        assert_eq!(
+            shell_command_from_argv(&with_env.argv).as_deref(),
+            Some(
+                "env CLAUDE_CONFIG_DIR=/home/u/.cc-mirror/zai/config claude --resume 96016622-2d77-4be2-bd66-58c876973caa"
+            )
+        );
+
+        session_ref.env = std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/tmp/claude home".to_string(),
+        )]);
+        let spaced_env = crate::agent_resume::plan("herdr:claude", "claude", &session_ref)
+            .expect("claude session with env should plan");
+        // env(1) parses assignment arguments itself, so quoting the whole
+        // NAME=VALUE word still assigns correctly in POSIX sh, bash, and fish.
+        assert_eq!(
+            shell_command_from_argv(&spaced_env.argv).as_deref(),
+            Some("env 'CLAUDE_CONFIG_DIR=/tmp/claude home' claude --resume 96016622-2d77-4be2-bd66-58c876973caa")
+        );
+
+        let plain =
+            crate::agent_resume::AgentSessionRef::id("96016622-2d77-4be2-bd66-58c876973caa")
+                .unwrap();
+        let without_env = crate::agent_resume::plan("herdr:claude", "claude", &plain).unwrap();
+        assert_eq!(
+            shell_command_from_argv(&without_env.argv).as_deref(),
+            Some("claude --resume 96016622-2d77-4be2-bd66-58c876973caa"),
+            "sessions without env must type the byte-identical previous command"
+        );
+    }
 }

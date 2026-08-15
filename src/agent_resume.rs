@@ -302,6 +302,11 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         }
         _ => return None,
     };
+    let argv = if session_ref.env.is_empty() {
+        argv
+    } else {
+        resume_argv_with_env(argv, &session_ref.env)
+    };
 
     Some(AgentResumePlan {
         agent: agent.to_string(),
@@ -310,11 +315,37 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
     })
 }
 
+// The resume command is typed into the pane shell, so the reported env must
+// scope to the resumed agent process only. An env(1) prefix keeps it
+// shell-agnostic (POSIX sh/bash/zsh/fish all exec env with assignment args)
+// and keeps the vars out of the spawned shell environment.
+#[cfg(unix)]
+fn resume_argv_with_env(mut argv: Vec<String>, env: &BTreeMap<String, String>) -> Vec<String> {
+    let mut prefixed = Vec::with_capacity(argv.len() + env.len() + 1);
+    prefixed.push("env".into());
+    prefixed.extend(env.iter().map(|(name, value)| format!("{name}={value}")));
+    prefixed.append(&mut argv);
+    prefixed
+}
+
+// Windows pane shells have no env(1); resume proceeds with today's behavior
+// there instead of typing a command the shell cannot run.
+#[cfg(windows)]
+fn resume_argv_with_env(argv: Vec<String>, _env: &BTreeMap<String, String>) -> Vec<String> {
+    argv
+}
+
 pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {
-    format!(
+    let mut key = format!(
         "{source}\u{0}{agent}\u{0}{:?}\u{0}{}",
         session_ref.kind, session_ref.value
-    )
+    );
+    if !session_ref.env.is_empty() {
+        // The same session id under a different reported env resolves to a
+        // different agent home, so it must not dedupe into one resume.
+        key.push_str(&format!("\u{0}{:?}", session_ref.env));
+    }
+    key
 }
 
 pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
@@ -797,6 +828,47 @@ mod tests {
         );
         assert_eq!(normalize_session_start_source(Some("other".into())), None);
         assert_eq!(normalize_session_start_source(None), None);
+    }
+
+    #[test]
+    fn plan_prefixes_reported_env_without_touching_the_plain_command() {
+        let plain = plan(
+            "herdr:claude",
+            "claude",
+            &AgentSessionRef::id("claude-session").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            plain.argv,
+            vec!["claude", "--resume", "claude-session"],
+            "sessions without env must keep the exact previous argv"
+        );
+        assert_eq!(
+            plain.dedupe_key, "herdr:claude\u{0}claude\u{0}Id\u{0}claude-session",
+            "sessions without env must keep the exact previous dedupe key"
+        );
+
+        let mut session_ref = AgentSessionRef::id("claude-session").unwrap();
+        session_ref.env = BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/tmp/claude home".to_string(),
+        )]);
+        let prefixed = plan("herdr:claude", "claude", &session_ref).unwrap();
+        assert_eq!(
+            prefixed.argv,
+            vec![
+                "env",
+                "CLAUDE_CONFIG_DIR=/tmp/claude home",
+                "claude",
+                "--resume",
+                "claude-session"
+            ]
+        );
+        assert_eq!(
+            prefixed.dedupe_key,
+            "herdr:claude\u{0}claude\u{0}Id\u{0}claude-session\u{0}{\"CLAUDE_CONFIG_DIR\": \"/tmp/claude home\"}",
+            "the same id under a different env is a different resumable session"
+        );
     }
 
     #[test]

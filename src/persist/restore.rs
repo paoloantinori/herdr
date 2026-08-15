@@ -1037,6 +1037,37 @@ mod tests {
         assert!(restore_plan_for_snapshot(&unsupported_path, true).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn restore_plan_replays_reported_env_prefix() {
+        let session = super::super::snapshot::PaneAgentSessionSnapshot {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "claude-session".into(),
+            env: std::collections::BTreeMap::from([
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/tmp/claude-home".to_string(),
+                ),
+                ("PATH".to_string(), "/usr/bin".to_string()),
+            ]),
+        };
+
+        assert_eq!(
+            restore_plan_for_snapshot(&session, true)
+                .expect("restored claude session with env should plan")
+                .argv,
+            vec![
+                "env",
+                "CLAUDE_CONFIG_DIR=/tmp/claude-home",
+                "claude",
+                "--resume",
+                "claude-session"
+            ]
+        );
+    }
+
     #[test]
     fn restore_plan_selection_suppresses_duplicates() {
         let pi_session_path = test_session_path("pi-session.jsonl");
