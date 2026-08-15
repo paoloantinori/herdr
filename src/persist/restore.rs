@@ -1037,9 +1037,8 @@ mod tests {
         assert!(restore_plan_for_snapshot(&unsupported_path, true).is_none());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn restore_plan_replays_reported_env_prefix() {
+    fn restore_plan_keeps_reported_env_out_of_argv() {
         let session = super::super::snapshot::PaneAgentSessionSnapshot {
             source: "herdr:claude".into(),
             agent: "claude".into(),
@@ -1054,17 +1053,19 @@ mod tests {
             ]),
         };
 
+        let plan = restore_plan_for_snapshot(&session, true)
+            .expect("restored claude session with env should plan");
         assert_eq!(
-            restore_plan_for_snapshot(&session, true)
-                .expect("restored claude session with env should plan")
-                .argv,
-            vec![
-                "env",
-                "CLAUDE_CONFIG_DIR=/tmp/claude-home",
-                "claude",
-                "--resume",
-                "claude-session"
-            ]
+            plan.argv,
+            vec!["claude", "--resume", "claude-session"],
+            "the env prefix is rendered at the shell seam, not in the stored plan"
+        );
+        assert_eq!(
+            plan.env,
+            std::collections::BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string(),
+            )])
         );
     }
 

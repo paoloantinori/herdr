@@ -217,7 +217,7 @@ impl App {
             return false;
         }
 
-        let Some(resume_command) = shell_command_from_argv(&plan.argv) else {
+        let Some(resume_command) = shell_command_from_resume_plan(&plan) else {
             tracing::warn!(
                 pane = pane_id.raw(),
                 terminal = %terminal_id,
@@ -332,6 +332,33 @@ fn shell_command_from_argv(argv: &[String]) -> Option<String> {
     Some(command)
 }
 
+// The resume command is typed into the pane shell, so the reported env must
+// scope to the resumed agent process only. An env(1) prefix keeps it
+// shell-agnostic (POSIX sh/bash/zsh/fish all exec env with assignment args)
+// and keeps the vars out of the spawned shell environment.
+#[cfg(unix)]
+fn shell_command_from_resume_plan(plan: &crate::agent_resume::AgentResumePlan) -> Option<String> {
+    let mut argv = Vec::with_capacity(plan.argv.len() + plan.env.len() + 1);
+    if !plan.env.is_empty() {
+        argv.push("env".to_string());
+        argv.extend(
+            plan.env
+                .iter()
+                .map(|(name, value)| format!("{name}={value}")),
+        );
+    }
+    argv.extend(plan.argv.iter().cloned());
+    shell_command_from_argv(&argv)
+}
+
+// Windows pane shells have no env(1) and the claude hook does not report env
+// there, so resume proceeds with today's behavior instead of typing a command
+// the shell cannot run.
+#[cfg(windows)]
+fn shell_command_from_resume_plan(plan: &crate::agent_resume::AgentResumePlan) -> Option<String> {
+    shell_command_from_argv(&plan.argv)
+}
+
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -402,6 +429,7 @@ mod tests {
             agent: "codex".into(),
             argv: marker_resume_test_argv(),
             dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+            env: std::collections::BTreeMap::new(),
         });
 
         assert!(!app.start_pending_agent_resumes(false));
@@ -480,6 +508,7 @@ mod tests {
             agent: "codex".into(),
             argv: long_running_test_argv(),
             dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+            env: std::collections::BTreeMap::new(),
         });
 
         app.sync_pending_agent_resume_deadline(std::time::Instant::now());
@@ -531,6 +560,7 @@ mod tests {
                 agent: "codex".into(),
                 argv: long_running_test_argv(),
                 dedupe_key: format!("herdr:codex\0codex\0Id\0{terminal_id}"),
+                env: std::collections::BTreeMap::new(),
             });
         }
         app.pending_agent_resume_deadline =
@@ -595,6 +625,7 @@ mod tests {
             agent: "codex".into(),
             argv: long_running_test_argv(),
             dedupe_key: "herdr:codex\0codex\0Id\0inactive-tab-session".into(),
+            env: std::collections::BTreeMap::new(),
         });
 
         assert!(app.start_pending_agent_resumes(false));
@@ -656,6 +687,7 @@ mod tests {
             agent: "codex".into(),
             argv: long_running_test_argv(),
             dedupe_key: "herdr:codex\0codex\0Id\0zoom-hidden-session".into(),
+            env: std::collections::BTreeMap::new(),
         });
 
         assert!(app.start_pending_agent_resumes(false));
@@ -714,6 +746,7 @@ mod tests {
             agent: "codex".into(),
             argv: long_running_test_argv(),
             dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+            env: std::collections::BTreeMap::new(),
         });
 
         app.sync_pending_agent_resume_deadline(std::time::Instant::now());
@@ -775,6 +808,7 @@ mod tests {
             agent: "codex".into(),
             argv: long_running_test_argv(),
             dedupe_key: "herdr:codex\0codex\0Id\0codex-session".into(),
+            env: std::collections::BTreeMap::new(),
         });
 
         assert!(app.start_pending_agent_resumes(false));
@@ -819,7 +853,7 @@ mod tests {
         let with_env = crate::agent_resume::plan("herdr:claude", "claude", &session_ref)
             .expect("claude session with env should plan");
         assert_eq!(
-            shell_command_from_argv(&with_env.argv).as_deref(),
+            shell_command_from_resume_plan(&with_env).as_deref(),
             Some(
                 "env CLAUDE_CONFIG_DIR=/home/u/.cc-mirror/zai/config claude --resume 96016622-2d77-4be2-bd66-58c876973caa"
             )
@@ -834,7 +868,7 @@ mod tests {
         // env(1) parses assignment arguments itself, so quoting the whole
         // NAME=VALUE word still assigns correctly in POSIX sh, bash, and fish.
         assert_eq!(
-            shell_command_from_argv(&spaced_env.argv).as_deref(),
+            shell_command_from_resume_plan(&spaced_env).as_deref(),
             Some("env 'CLAUDE_CONFIG_DIR=/tmp/claude home' claude --resume 96016622-2d77-4be2-bd66-58c876973caa")
         );
 
@@ -843,7 +877,7 @@ mod tests {
                 .unwrap();
         let without_env = crate::agent_resume::plan("herdr:claude", "claude", &plain).unwrap();
         assert_eq!(
-            shell_command_from_argv(&without_env.argv).as_deref(),
+            shell_command_from_resume_plan(&without_env).as_deref(),
             Some("claude --resume 96016622-2d77-4be2-bd66-58c876973caa"),
             "sessions without env must type the byte-identical previous command"
         );

@@ -47,9 +47,6 @@ try {
     if ($payload.hook_event_name -eq "SessionStart" -and $payload.source -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.source)) {
         $args += @("--session-start-source", "$($payload.source)")
     }
-    if (-not [string]::IsNullOrWhiteSpace($env:CLAUDE_CONFIG_DIR)) {
-        $args += @("--env", "CLAUDE_CONFIG_DIR=$env:CLAUDE_CONFIG_DIR")
-    }
     & $herdr @args 2>$null | Out-Null
 } catch {
 }

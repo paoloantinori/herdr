@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,7 @@ pub enum AgentSessionRefKind {
 pub struct AgentResumePlan {
     pub agent: String,
     pub argv: Vec<String>,
+    pub env: BTreeMap<String, String>,
     pub dedupe_key: String,
 }
 
@@ -62,18 +64,21 @@ pub fn session_ref_from_report(
     agent: &str,
     agent_session_id: Option<String>,
     _agent_session_path: Option<String>,
+    env: BTreeMap<String, String>,
 ) -> Option<AgentSessionRef> {
     if !is_official_agent_source(source, agent) {
         return None;
     }
 
-    if agent == "pi" || agent == "omp" {
-        return _agent_session_path
+    let mut session_ref = if agent == "pi" || agent == "omp" {
+        _agent_session_path
             .and_then(AgentSessionRef::path)
-            .or_else(|| agent_session_id.and_then(AgentSessionRef::id));
-    }
-
-    agent_session_id.and_then(AgentSessionRef::id)
+            .or_else(|| agent_session_id.and_then(AgentSessionRef::id))?
+    } else {
+        agent_session_id.and_then(AgentSessionRef::id)?
+    };
+    session_ref.env = normalize_reported_env(agent, env);
+    Some(session_ref)
 }
 
 pub fn persisted_session_from_launch_args(
@@ -94,48 +99,30 @@ pub fn persisted_session_from_launch_args(
     })
 }
 
-pub fn session_ref_from_report_with_env(
-    source: &str,
-    agent: &str,
-    agent_session_id: Option<String>,
-    agent_session_path: Option<String>,
-    env: &BTreeMap<String, String>,
-) -> Option<AgentSessionRef> {
-    let mut session_ref =
-        session_ref_from_report(source, agent, agent_session_id, agent_session_path)?;
-    session_ref.env = normalize_reported_env(agent, env);
-    Some(session_ref)
-}
-
 /// Environment variable names each integration may report for its sessions.
 /// Names outside this table are dropped server-side and never persisted, so a
 /// compromised or buggy hook cannot smuggle arbitrary environment into the
-/// resume command. Keep each list within `MAX_REPORTED_ENV_VARS` to match the
+/// resume command. Each list stays within `MAX_REPORTED_ENV_VARS` to match the
 /// API schema cap.
 fn reported_env_allowlist(agent: &str) -> &'static [&'static str] {
-    match agent {
-        "claude" => &["CLAUDE_CONFIG_DIR"],
+    let allowlist: &'static [&'static str] = match agent {
+        "claude" => &[crate::integration::CLAUDE_CONFIG_DIR_ENV_VAR],
         _ => &[],
-    }
+    };
+    debug_assert!(allowlist.len() <= MAX_REPORTED_ENV_VARS);
+    allowlist
 }
 
-pub fn normalize_reported_env(
+fn normalize_reported_env(
     agent: &str,
-    env: &BTreeMap<String, String>,
+    mut env: BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    if env.len() > MAX_REPORTED_ENV_VARS {
-        return BTreeMap::new();
-    }
     let allowlist = reported_env_allowlist(agent);
-    env.iter()
-        .filter(|(name, value)| {
-            allowlist.contains(&name.as_str())
-                && !value.is_empty()
-                && value.len() <= MAX_REPORTED_ENV_VALUE_LEN
-                && !value.chars().any(char::is_control)
-        })
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
+    env.retain(|name, value| {
+        allowlist.contains(&name.as_str())
+            && valid_reported_value(value, MAX_REPORTED_ENV_VALUE_LEN)
+    });
+    env
 }
 
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
@@ -180,7 +167,7 @@ pub fn session_ref_from_snapshot(
     };
     // session.json is written by the server, but re-apply the allowlist on
     // restore so a hand-edited or stale file cannot widen the replayed env.
-    session_ref.env = normalize_reported_env(agent, env);
+    session_ref.env = normalize_reported_env(agent, env.clone());
     Some(PersistedAgentSession {
         source: source.to_string(),
         agent: agent.to_string(),
@@ -302,37 +289,13 @@ pub fn plan(source: &str, agent: &str, session_ref: &AgentSessionRef) -> Option<
         }
         _ => return None,
     };
-    let argv = if session_ref.env.is_empty() {
-        argv
-    } else {
-        resume_argv_with_env(argv, &session_ref.env)
-    };
 
     Some(AgentResumePlan {
         agent: agent.to_string(),
         argv,
+        env: session_ref.env.clone(),
         dedupe_key: dedupe_key(source, agent, session_ref),
     })
-}
-
-// The resume command is typed into the pane shell, so the reported env must
-// scope to the resumed agent process only. An env(1) prefix keeps it
-// shell-agnostic (POSIX sh/bash/zsh/fish all exec env with assignment args)
-// and keeps the vars out of the spawned shell environment.
-#[cfg(unix)]
-fn resume_argv_with_env(mut argv: Vec<String>, env: &BTreeMap<String, String>) -> Vec<String> {
-    let mut prefixed = Vec::with_capacity(argv.len() + env.len() + 1);
-    prefixed.push("env".into());
-    prefixed.extend(env.iter().map(|(name, value)| format!("{name}={value}")));
-    prefixed.append(&mut argv);
-    prefixed
-}
-
-// Windows pane shells have no env(1); resume proceeds with today's behavior
-// there instead of typing a command the shell cannot run.
-#[cfg(windows)]
-fn resume_argv_with_env(argv: Vec<String>, _env: &BTreeMap<String, String>) -> Vec<String> {
-    argv
 }
 
 pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> String {
@@ -343,7 +306,7 @@ pub fn dedupe_key(source: &str, agent: &str, session_ref: &AgentSessionRef) -> S
     if !session_ref.env.is_empty() {
         // The same session id under a different reported env resolves to a
         // different agent home, so it must not dedupe into one resume.
-        key.push_str(&format!("\u{0}{:?}", session_ref.env));
+        let _ = write!(key, "\u{0}{:?}", session_ref.env);
     }
     key
 }
@@ -372,15 +335,16 @@ pub(crate) fn is_official_agent_source(source: &str, agent: &str) -> bool {
     )
 }
 
+fn valid_reported_value(value: &str, max_len: usize) -> bool {
+    !value.is_empty() && value.len() <= max_len && !value.chars().any(char::is_control)
+}
+
 fn valid_session_id(value: &str) -> bool {
-    !value.is_empty() && value.len() <= MAX_SESSION_ID_LEN && !value.chars().any(char::is_control)
+    valid_reported_value(value, MAX_SESSION_ID_LEN)
 }
 
 fn valid_session_path(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_SESSION_PATH_LEN
-        && !value.chars().any(char::is_control)
-        && Path::new(value).is_absolute()
+    valid_reported_value(value, MAX_SESSION_PATH_LEN) && Path::new(value).is_absolute()
 }
 
 #[cfg(test)]
@@ -679,30 +643,56 @@ mod tests {
             "pi",
             Some("pi-id".into()),
             Some(pi_session.clone()),
+            BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Path);
         assert_eq!(session_ref.value, pi_session);
 
-        assert!(session_ref_from_report("herdr:pi", "pi", Some("bad\nid".into()), None).is_none());
-        assert!(
-            session_ref_from_report("herdr:pi", "pi", None, Some("relative.jsonl".into()))
-                .is_none()
-        );
-        assert!(session_ref_from_report("custom:pi", "pi", Some("pi-id".into()), None).is_none());
+        assert!(session_ref_from_report(
+            "herdr:pi",
+            "pi",
+            Some("bad\nid".into()),
+            None,
+            BTreeMap::new()
+        )
+        .is_none());
+        assert!(session_ref_from_report(
+            "herdr:pi",
+            "pi",
+            None,
+            Some("relative.jsonl".into()),
+            BTreeMap::new()
+        )
+        .is_none());
+        assert!(session_ref_from_report(
+            "custom:pi",
+            "pi",
+            Some("pi-id".into()),
+            None,
+            BTreeMap::new()
+        )
+        .is_none());
 
         let session_ref = session_ref_from_report(
             "herdr:omp",
             "omp",
             Some("omp-id".into()),
             Some(omp_session.clone()),
+            BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Path);
         assert_eq!(session_ref.value, omp_session);
 
-        let session_ref =
-            session_ref_from_report("herdr:omp", "omp", Some("omp-id".into()), None).unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:omp",
+            "omp",
+            Some("omp-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "omp-id");
         let session_ref = session_ref_from_report(
@@ -710,48 +700,86 @@ mod tests {
             "omp",
             Some("omp-id".into()),
             Some("relative.jsonl".into()),
+            BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "omp-id");
-        assert!(
-            session_ref_from_report("herdr:omp", "omp", None, Some("relative.jsonl".into()))
-                .is_none()
-        );
+        assert!(session_ref_from_report(
+            "herdr:omp",
+            "omp",
+            None,
+            Some("relative.jsonl".into()),
+            BTreeMap::new()
+        )
+        .is_none());
 
-        assert!(
-            session_ref_from_report("herdr:claude", "claude", None, Some(claude_session)).is_none()
-        );
+        assert!(session_ref_from_report(
+            "herdr:claude",
+            "claude",
+            None,
+            Some(claude_session),
+            BTreeMap::new()
+        )
+        .is_none());
 
-        let session_ref =
-            session_ref_from_report("herdr:copilot", "copilot", Some("copilot-id".into()), None)
-                .unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:copilot",
+            "copilot",
+            Some("copilot-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "copilot-id");
-        assert!(
-            session_ref_from_report("herdr:copilot", "copilot", None, Some(copilot_session))
-                .is_none()
-        );
+        assert!(session_ref_from_report(
+            "herdr:copilot",
+            "copilot",
+            None,
+            Some(copilot_session),
+            BTreeMap::new()
+        )
+        .is_none());
 
-        let session_ref =
-            session_ref_from_report("herdr:devin", "devin", Some("devin-id".into()), None).unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:devin",
+            "devin",
+            Some("devin-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "devin-id");
 
-        let session_ref =
-            session_ref_from_report("herdr:droid", "droid", Some("droid-id".into()), None).unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:droid",
+            "droid",
+            Some("droid-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "droid-id");
         assert!(session_ref_from_report(
             "herdr:droid",
             "droid",
             None,
-            Some("/tmp/droid-session".into())
+            Some("/tmp/droid-session".into()),
+            BTreeMap::new()
         )
         .is_none());
 
-        let session_ref =
-            session_ref_from_report("herdr:kimi", "kimi", Some("kimi-id".into()), None).unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:kimi",
+            "kimi",
+            Some("kimi-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "kimi-id");
 
@@ -760,30 +788,53 @@ mod tests {
             "mastracode",
             Some("mastracode-id".into()),
             None,
+            BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "mastracode-id");
 
-        let session_ref =
-            session_ref_from_report("herdr:kilo", "kilo", Some("kilo-id".into()), None).unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:kilo",
+            "kilo",
+            Some("kilo-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "kilo-id");
 
-        let session_ref =
-            session_ref_from_report("herdr:qodercli", "qodercli", Some("qoder-id".into()), None)
-                .unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:qodercli",
+            "qodercli",
+            Some("qoder-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "qoder-id");
 
-        let session_ref =
-            session_ref_from_report("herdr:qwen", "qwen", Some("qwen-id".into()), None).unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:qwen",
+            "qwen",
+            Some("qwen-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "qwen-id");
 
-        let session_ref =
-            session_ref_from_report("herdr:antigravity_cli", "agy", Some("agy-id".into()), None)
-                .unwrap();
+        let session_ref = session_ref_from_report(
+            "herdr:antigravity_cli",
+            "agy",
+            Some("agy-id".into()),
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
         assert_eq!(session_ref.value, "agy-id");
     }
@@ -831,7 +882,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_prefixes_reported_env_without_touching_the_plain_command() {
+    fn plan_keeps_reported_env_off_the_plain_command() {
         let plain = plan(
             "herdr:claude",
             "claude",
@@ -843,6 +894,7 @@ mod tests {
             vec!["claude", "--resume", "claude-session"],
             "sessions without env must keep the exact previous argv"
         );
+        assert!(plain.env.is_empty());
         assert_eq!(
             plain.dedupe_key, "herdr:claude\u{0}claude\u{0}Id\u{0}claude-session",
             "sessions without env must keep the exact previous dedupe key"
@@ -853,19 +905,15 @@ mod tests {
             "CLAUDE_CONFIG_DIR".to_string(),
             "/tmp/claude home".to_string(),
         )]);
-        let prefixed = plan("herdr:claude", "claude", &session_ref).unwrap();
+        let with_env = plan("herdr:claude", "claude", &session_ref).unwrap();
         assert_eq!(
-            prefixed.argv,
-            vec![
-                "env",
-                "CLAUDE_CONFIG_DIR=/tmp/claude home",
-                "claude",
-                "--resume",
-                "claude-session"
-            ]
+            with_env.argv,
+            vec!["claude", "--resume", "claude-session"],
+            "the env prefix is rendered at the shell seam, not by the planner"
         );
+        assert_eq!(with_env.env, session_ref.env);
         assert_eq!(
-            prefixed.dedupe_key,
+            with_env.dedupe_key,
             "herdr:claude\u{0}claude\u{0}Id\u{0}claude-session\u{0}{\"CLAUDE_CONFIG_DIR\": \"/tmp/claude home\"}",
             "the same id under a different env is a different resumable session"
         );
@@ -882,20 +930,36 @@ mod tests {
             ("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string()),
         ]);
         assert_eq!(
-            normalize_reported_env("claude", &reported),
+            normalize_reported_env("claude", reported.clone()),
             BTreeMap::from([(
                 "CLAUDE_CONFIG_DIR".to_string(),
                 "/home/u/.cc-mirror/zai/config".to_string(),
             )])
         );
-        assert!(normalize_reported_env("codex", &reported).is_empty());
+        assert!(normalize_reported_env("codex", reported).is_empty());
+
+        let oversized = (0..=MAX_REPORTED_ENV_VARS)
+            .map(|index| (format!("VAR_{index}"), "value".to_string()))
+            .chain([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string(),
+            )])
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            normalize_reported_env("claude", oversized),
+            BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string(),
+            )]),
+            "oversized reports filter per entry instead of dropping everything"
+        );
 
         let invalid_values = [String::new(), "x".repeat(1025), "bad\nvalue".to_string()];
         for invalid_value in invalid_values {
             let invalid =
                 BTreeMap::from([("CLAUDE_CONFIG_DIR".to_string(), invalid_value.clone())]);
             assert!(
-                normalize_reported_env("claude", &invalid).is_empty(),
+                normalize_reported_env("claude", invalid).is_empty(),
                 "invalid value {invalid_value:?} must be dropped"
             );
         }
@@ -903,12 +967,12 @@ mod tests {
 
     #[test]
     fn report_ref_attaches_normalized_env() {
-        let session_ref = session_ref_from_report_with_env(
+        let session_ref = session_ref_from_report(
             "herdr:claude",
             "claude",
             Some("claude-session".into()),
             None,
-            &BTreeMap::from([
+            BTreeMap::from([
                 (
                     "CLAUDE_CONFIG_DIR".to_string(),
                     "/tmp/claude-home".to_string(),

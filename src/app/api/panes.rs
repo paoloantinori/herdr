@@ -1546,6 +1546,7 @@ impl App {
                 &agent_label,
                 params.agent_session_id,
                 params.agent_session_path,
+                std::collections::BTreeMap::new(),
             ),
             source: params.source,
             agent_label,
@@ -1570,12 +1571,12 @@ impl App {
         };
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report_with_env(
+            session_ref: crate::agent_resume::session_ref_from_report(
                 &params.source,
                 &agent_label,
                 params.agent_session_id,
                 params.agent_session_path,
-                &params.env,
+                params.env,
             ),
             source: params.source,
             agent_label,

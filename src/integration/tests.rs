@@ -3114,7 +3114,12 @@ fn bundled_integration_assets_report_session_refs() {
         CLAUDE_HOOK_ASSET.contains("pane.report_agent_session")
             || CLAUDE_HOOK_ASSET.contains("report-agent-session")
     );
-    assert!(CLAUDE_HOOK_ASSET.contains("CLAUDE_CONFIG_DIR") || CLAUDE_HOOK_ASSET.contains("--env"));
+    // Only the unix hook reports CLAUDE_CONFIG_DIR: the Windows ps1 hook must
+    // not report env that Windows restore cannot replay yet.
+    #[cfg(unix)]
+    assert!(CLAUDE_HOOK_ASSET.contains("CLAUDE_CONFIG_DIR"));
+    #[cfg(windows)]
+    assert!(!CLAUDE_HOOK_ASSET.contains("--env"));
     assert!(!CLAUDE_HOOK_ASSET.contains("\"state\": action"));
     assert!(!CLAUDE_HOOK_ASSET.contains("pane.release_agent"));
     assert!(
