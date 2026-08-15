@@ -89,6 +89,8 @@ Native session restore requires these Herdr integration versions or newer:
 
 Run `herdr integration status` to check installed integration versions. Reinstall outdated integrations with `herdr integration install <agent>`.
 
+Claude Code integration version 8 and newer also report the `CLAUDE_CONFIG_DIR` the session was started with when it points at a non-default config home, and restore replays it as part of the resume command so the session resolves in the right home. Names outside each integration's reported-env allowlist are dropped instead of persisted.
+
 Unsupported, missing, invalid, duplicated, or stale session references restore as normal shells in the saved pane directory.
 
 If native agent session restore applies to a pane, Herdr resumes the agent session instead of replaying saved pane history for that pane.

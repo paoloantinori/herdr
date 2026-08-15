@@ -161,6 +161,7 @@
 - On Unix, Ctrl-click URL openers are now reaped after they exit, preventing defunct child processes from accumulating on long-running servers. (#2903)
 - Windows updates now reuse only verified local packages, avoiding security-tool download blocks while preserving checksum validation. (#2751, #2816, thanks @Pimpmuckl)
 - Herdr no longer sends the full OSC 4 palette query burst under WSL, preventing reply fragments from leaking into the shell through ConPTY. (#2440)
+- Claude Code session restore now replays the `CLAUDE_CONFIG_DIR` reported by the session hook, so sessions started from a non-default config home resume into the right home instead of failing to find the conversation; re-run `herdr integration install claude` to pick up the updated hook.
 - Qwen Code panes now use locale-independent terminal-title states and localized confirmation fallbacks, preventing active or blocked turns from appearing idle. (#2756)
 - Claude Code panes now recognize and strip every half-circle title spinner frame, preventing active turns from appearing idle and keeping titles clean. (#2707, #2709, #2760, #2762)
 - Copilot prompts now focus the target pane before sending input, so background panes do not silently drop prompts. (#1698, #2734, thanks @xkrogen)
