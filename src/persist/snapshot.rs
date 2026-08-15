@@ -115,6 +115,8 @@ pub struct PaneAgentSessionSnapshot {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -343,6 +345,7 @@ fn capture_tab(
                         agent: authority.agent_label.clone(),
                         kind: session_ref.kind,
                         value: session_ref.value.clone(),
+                        env: session_ref.env.clone(),
                     });
                 }
             }
@@ -354,6 +357,7 @@ fn capture_tab(
                     agent: session.agent.clone(),
                     kind: session.session_ref.kind,
                     value: session.session_ref.value.clone(),
+                    env: session.session_ref.env.clone(),
                 })
         });
         panes.insert(
@@ -1176,6 +1180,119 @@ mod tests {
             crate::agent_resume::AgentSessionRefKind::Id
         );
         assert_eq!(agent_session.value, "opencode-session");
+    }
+
+    fn agent_session_env() -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/tmp/claude-home".to_string(),
+        )])
+    }
+
+    #[test]
+    fn capture_contract_tracks_hook_authority_agent_session_env() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority_with_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::detect::AgentState::Working,
+                None,
+                Some(crate::agent_resume::AgentSessionRef {
+                    kind: crate::agent_resume::AgentSessionRefKind::Id,
+                    value: "claude-session".into(),
+                    env: agent_session_env(),
+                }),
+                Some(20),
+            );
+
+        let snapshot = capture_from_state(&state);
+        let agent_session = snapshot.workspaces[0].tabs[0].panes[&root.raw()]
+            .agent_session
+            .as_ref()
+            .expect("agent session should be captured");
+
+        assert_eq!(agent_session.source, "herdr:claude");
+        assert_eq!(agent_session.env, agent_session_env());
+    }
+
+    #[test]
+    fn capture_contract_preserves_persisted_agent_session_env() {
+        let mut state = state_with_workspaces(&["one"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        state.ensure_test_terminals();
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                session_ref: crate::agent_resume::AgentSessionRef {
+                    kind: crate::agent_resume::AgentSessionRefKind::Id,
+                    value: "claude-session".into(),
+                    env: agent_session_env(),
+                },
+            });
+
+        let snapshot = capture_from_state(&state);
+        let agent_session = snapshot.workspaces[0].tabs[0].panes[&root.raw()]
+            .agent_session
+            .as_ref()
+            .expect("persisted agent session should be captured");
+
+        assert_eq!(agent_session.source, "herdr:claude");
+        assert_eq!(agent_session.env, agent_session_env());
+    }
+
+    #[test]
+    fn agent_session_snapshot_with_env_loads_under_previous_shape() {
+        #[derive(Deserialize)]
+        struct PreviousPaneAgentSessionSnapshot {
+            source: String,
+            agent: String,
+            kind: crate::agent_resume::AgentSessionRefKind,
+            value: String,
+        }
+
+        let json = r#"{"source":"herdr:claude","agent":"claude","kind":"id","value":"claude-session","env":{"CLAUDE_CONFIG_DIR":"/tmp/claude-home"}}"#;
+        let previous: PreviousPaneAgentSessionSnapshot = serde_json::from_str(json)
+            .expect("older binaries must ignore the env field on downgrade");
+        assert_eq!(previous.source, "herdr:claude");
+        assert_eq!(previous.agent, "claude");
+        assert_eq!(previous.kind, crate::agent_resume::AgentSessionRefKind::Id);
+        assert_eq!(previous.value, "claude-session");
+
+        let current: PaneAgentSessionSnapshot =
+            serde_json::from_str(json).expect("current shape should parse env");
+        assert_eq!(
+            current.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/tmp/claude-home")
+        );
+
+        let plain = PaneAgentSessionSnapshot {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "claude-session".into(),
+            env: std::collections::BTreeMap::new(),
+        };
+        let serialized = serde_json::to_string(&plain).unwrap();
+        assert!(
+            !serialized.contains("env"),
+            "sessions without env must serialize byte-identically to previous versions: {serialized}"
+        );
     }
 
     #[test]

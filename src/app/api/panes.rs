@@ -1570,11 +1570,12 @@ impl App {
         };
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
-            session_ref: crate::agent_resume::session_ref_from_report(
+            session_ref: crate::agent_resume::session_ref_from_report_with_env(
                 &params.source,
                 &agent_label,
                 params.agent_session_id,
                 params.agent_session_path,
+                &params.env,
             ),
             source: params.source,
             agent_label,

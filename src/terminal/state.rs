@@ -14,6 +14,14 @@ use crate::terminal::TerminalId;
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 
+type SessionIdentity = (
+    String,
+    String,
+    crate::agent_resume::AgentSessionRefKind,
+    String,
+    std::collections::BTreeMap<String, String>,
+);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookAuthority {
     pub source: String,
@@ -1234,14 +1242,7 @@ impl TerminalState {
             })
     }
 
-    fn current_session_identity_for_persistence(
-        &self,
-    ) -> Option<(
-        String,
-        String,
-        crate::agent_resume::AgentSessionRefKind,
-        String,
-    )> {
+    fn current_session_identity_for_persistence(&self) -> Option<SessionIdentity> {
         if let Some(authority) = self.hook_authority.as_ref() {
             if let Some(session_ref) = authority.session_ref.as_ref() {
                 return Some((
@@ -1249,6 +1250,7 @@ impl TerminalState {
                     authority.agent_label.clone(),
                     session_ref.kind,
                     session_ref.value.clone(),
+                    session_ref.env.clone(),
                 ));
             }
         }
@@ -1258,13 +1260,14 @@ impl TerminalState {
                 session.agent.clone(),
                 session.session_ref.kind,
                 session.session_ref.value.clone(),
+                session.session_ref.env.clone(),
             )
         })
     }
 
     fn current_session_owner_conflicts(&self, source: &str, agent_label: &str) -> bool {
         self.current_session_identity_for_persistence().is_some_and(
-            |(current_source, current_agent, _, _)| {
+            |(current_source, current_agent, _, _, _)| {
                 current_source != source || current_agent != agent_label
             },
         )
@@ -1278,7 +1281,7 @@ impl TerminalState {
         session_start_source: Option<&str>,
     ) -> Option<crate::agent_resume::AgentSessionRef> {
         self.current_session_identity_for_persistence().and_then(
-            |(current_source, current_agent, current_kind, current_value)| {
+            |(current_source, current_agent, current_kind, current_value, current_env)| {
                 (current_source == source
                     && current_agent == agent_label
                     && current_kind == crate::agent_resume::AgentSessionRefKind::Id
@@ -1292,6 +1295,7 @@ impl TerminalState {
                 .then_some(crate::agent_resume::AgentSessionRef {
                     kind: current_kind,
                     value: current_value,
+                    env: current_env,
                 })
             },
         )
@@ -1538,7 +1542,7 @@ impl TerminalState {
             crate::detect::session_identity_only_integration(&source, &agent_label)
                 && session_replacement_allowed
                 && self.current_session_identity_for_persistence().is_some_and(
-                    |(current_source, current_agent, current_kind, current_value)| {
+                    |(current_source, current_agent, current_kind, current_value, _)| {
                         current_source == source
                             && current_agent == agent_label
                             && current_kind == crate::agent_resume::AgentSessionRefKind::Id
@@ -2746,7 +2750,77 @@ mod tests {
                 "pi".into(),
                 crate::agent_resume::AgentSessionRefKind::Path,
                 new_session,
+                std::collections::BTreeMap::new(),
             ))
+        );
+    }
+
+    #[test]
+    fn session_reports_persist_env_with_the_session_identity() {
+        let session_ref = |config_dir: &str| {
+            Some(crate::agent_resume::AgentSessionRef {
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: "claude-session".into(),
+                env: std::collections::BTreeMap::from([(
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    config_dir.to_string(),
+                )]),
+            })
+        };
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let first = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                session_ref("/tmp/claude-home"),
+                Some(10),
+                Some("startup".into()),
+            )
+            .expect("session report with env should be accepted");
+        assert!(first.session_ref_changed);
+        assert_eq!(
+            terminal.current_session_identity_for_persistence(),
+            Some((
+                "herdr:claude".into(),
+                "claude".into(),
+                crate::agent_resume::AgentSessionRefKind::Id,
+                "claude-session".into(),
+                std::collections::BTreeMap::from([(
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/tmp/claude-home".to_string(),
+                )]),
+            ))
+        );
+
+        let unchanged = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                session_ref("/tmp/claude-home"),
+                Some(11),
+                Some("resume".into()),
+            )
+            .expect("repeat report should be accepted");
+        assert!(
+            !unchanged.session_ref_changed,
+            "the same session env must not count as a change"
+        );
+
+        let rotated_env = terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:claude".into(),
+                "claude".into(),
+                session_ref("/tmp/other-claude-home"),
+                Some(12),
+                Some("resume".into()),
+            )
+            .expect("env rotation should be accepted");
+        assert!(
+            rotated_env.session_ref_changed,
+            "a changed session env must mark the session identity as changed"
         );
     }
 
@@ -5358,7 +5432,8 @@ mod tests {
                 "herdr:codex".into(),
                 "codex".into(),
                 crate::agent_resume::AgentSessionRefKind::Id,
-                "codex-session".into()
+                "codex-session".into(),
+                std::collections::BTreeMap::new()
             ))
         );
         let late_old_session = terminal.set_hook_authority_with_session_ref(

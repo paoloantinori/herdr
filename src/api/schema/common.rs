@@ -22,6 +22,17 @@ pub(super) fn metadata_token_values_schema(
     })
 }
 
+pub(super) fn reported_agent_env_schema(
+    _generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "maxProperties": crate::agent_resume::MAX_REPORTED_ENV_VARS,
+        "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]*$" },
+        "additionalProperties": { "type": "string", "maxLength": crate::agent_resume::MAX_REPORTED_ENV_VALUE_LEN }
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default)]
 pub struct EmptyParams {}
 

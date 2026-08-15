@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::*;
 
@@ -413,6 +413,68 @@ fn agent_view_requests_round_trip() {
     let request: Request = serde_json::from_value(clear_json.clone()).unwrap();
     assert!(matches!(request.method, Method::AgentViewClear(_)));
     assert_eq!(serde_json::to_value(request).unwrap(), clear_json);
+}
+
+#[test]
+fn pane_report_agent_session_env_round_trips_and_stays_optional() {
+    let request = Request {
+        id: "req_session_env".into(),
+        method: Method::PaneReportAgentSession(PaneReportAgentSessionParams {
+            pane_id: "p_1".into(),
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            seq: Some(1),
+            agent_session_id: Some("claude-session".into()),
+            agent_session_path: None,
+            session_start_source: None,
+            env: BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string(),
+            )]),
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(json["method"], "pane.report_agent_session");
+    assert_eq!(
+        json["params"]["env"]["CLAUDE_CONFIG_DIR"],
+        "/tmp/claude-home"
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let legacy_json = serde_json::json!({
+        "id": "req_session_legacy",
+        "method": "pane.report_agent_session",
+        "params": {
+            "pane_id": "p_1",
+            "source": "herdr:claude",
+            "agent": "claude",
+            "agent_session_id": "claude-session"
+        }
+    });
+    let request: Request = serde_json::from_value(legacy_json).unwrap();
+    let Method::PaneReportAgentSession(params) = request.method else {
+        panic!("wrong method parsed");
+    };
+    assert_eq!(params.agent_session_id.as_deref(), Some("claude-session"));
+    assert!(params.env.is_empty());
+
+    #[derive(Deserialize)]
+    struct PreviousPaneReportAgentSessionParams {
+        pane_id: String,
+        source: String,
+        agent: String,
+    }
+    let with_env = serde_json::json!({
+        "pane_id": "p_1",
+        "source": "herdr:claude",
+        "agent": "claude",
+        "env": {"CLAUDE_CONFIG_DIR": "/tmp/claude-home"}
+    });
+    let previous: PreviousPaneReportAgentSessionParams = serde_json::from_value(with_env)
+        .expect("older servers must ignore the env param sent by newer hooks");
+    assert_eq!(previous.pane_id, "p_1");
+    assert_eq!(previous.source, "herdr:claude");
+    assert_eq!(previous.agent, "claude");
 }
 
 #[test]

@@ -1,14 +1,19 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 const MAX_SESSION_ID_LEN: usize = 512;
 const MAX_SESSION_PATH_LEN: usize = 4096;
+pub(crate) const MAX_REPORTED_ENV_VARS: usize = 4;
+pub(crate) const MAX_REPORTED_ENV_VALUE_LEN: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSessionRef {
     pub kind: AgentSessionRefKind,
     pub value: String,
+    // BTreeMap keeps the persisted order and the resume prefix stable.
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -38,6 +43,7 @@ impl AgentSessionRef {
         valid_session_id(&value).then_some(Self {
             kind: AgentSessionRefKind::Id,
             value,
+            env: BTreeMap::new(),
         })
     }
 
@@ -46,6 +52,7 @@ impl AgentSessionRef {
         valid_session_path(&value).then_some(Self {
             kind: AgentSessionRefKind::Path,
             value,
+            env: BTreeMap::new(),
         })
     }
 }
@@ -87,6 +94,50 @@ pub fn persisted_session_from_launch_args(
     })
 }
 
+pub fn session_ref_from_report_with_env(
+    source: &str,
+    agent: &str,
+    agent_session_id: Option<String>,
+    agent_session_path: Option<String>,
+    env: &BTreeMap<String, String>,
+) -> Option<AgentSessionRef> {
+    let mut session_ref =
+        session_ref_from_report(source, agent, agent_session_id, agent_session_path)?;
+    session_ref.env = normalize_reported_env(agent, env);
+    Some(session_ref)
+}
+
+/// Environment variable names each integration may report for its sessions.
+/// Names outside this table are dropped server-side and never persisted, so a
+/// compromised or buggy hook cannot smuggle arbitrary environment into the
+/// resume command. Keep each list within `MAX_REPORTED_ENV_VARS` to match the
+/// API schema cap.
+fn reported_env_allowlist(agent: &str) -> &'static [&'static str] {
+    match agent {
+        "claude" => &["CLAUDE_CONFIG_DIR"],
+        _ => &[],
+    }
+}
+
+pub fn normalize_reported_env(
+    agent: &str,
+    env: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    if env.len() > MAX_REPORTED_ENV_VARS {
+        return BTreeMap::new();
+    }
+    let allowlist = reported_env_allowlist(agent);
+    env.iter()
+        .filter(|(name, value)| {
+            allowlist.contains(&name.as_str())
+                && !value.is_empty()
+                && value.len() <= MAX_REPORTED_ENV_VALUE_LEN
+                && !value.chars().any(char::is_control)
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 pub fn normalize_session_start_source(value: Option<String>) -> Option<String> {
     match value.as_deref().map(str::trim) {
         Some(
@@ -117,15 +168,19 @@ pub fn session_ref_from_snapshot(
     agent: &str,
     kind: AgentSessionRefKind,
     value: &str,
+    env: &BTreeMap<String, String>,
 ) -> Option<PersistedAgentSession> {
     if !is_official_agent_source(source, agent) {
         return None;
     }
-    let session_ref = match (agent, kind) {
+    let mut session_ref = match (agent, kind) {
         ("pi" | "omp", AgentSessionRefKind::Path) => AgentSessionRef::path(value)?,
         (_, AgentSessionRefKind::Id) => AgentSessionRef::id(value)?,
         _ => return None,
     };
+    // session.json is written by the server, but re-apply the allowlist on
+    // restore so a hand-edited or stale file cannot widen the replayed env.
+    session_ref.env = normalize_reported_env(agent, env);
     Some(PersistedAgentSession {
         source: source.to_string(),
         agent: agent.to_string(),
@@ -745,6 +800,88 @@ mod tests {
     }
 
     #[test]
+    fn reported_env_keeps_only_allowlisted_names_and_valid_values() {
+        let reported = BTreeMap::from([
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/home/u/.cc-mirror/zai/config".to_string(),
+            ),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string()),
+        ]);
+        assert_eq!(
+            normalize_reported_env("claude", &reported),
+            BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/home/u/.cc-mirror/zai/config".to_string(),
+            )])
+        );
+        assert!(normalize_reported_env("codex", &reported).is_empty());
+
+        let invalid_values = [String::new(), "x".repeat(1025), "bad\nvalue".to_string()];
+        for invalid_value in invalid_values {
+            let invalid =
+                BTreeMap::from([("CLAUDE_CONFIG_DIR".to_string(), invalid_value.clone())]);
+            assert!(
+                normalize_reported_env("claude", &invalid).is_empty(),
+                "invalid value {invalid_value:?} must be dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn report_ref_attaches_normalized_env() {
+        let session_ref = session_ref_from_report_with_env(
+            "herdr:claude",
+            "claude",
+            Some("claude-session".into()),
+            None,
+            &BTreeMap::from([
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/tmp/claude-home".to_string(),
+                ),
+                ("NODE_ENV".to_string(), "production".to_string()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(session_ref.kind, AgentSessionRefKind::Id);
+        assert_eq!(session_ref.value, "claude-session");
+        assert_eq!(
+            session_ref.env,
+            BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string(),
+            )])
+        );
+    }
+
+    #[test]
+    fn snapshot_ref_restores_reported_env_and_drops_unlisted_names() {
+        let persisted = session_ref_from_snapshot(
+            "herdr:claude",
+            "claude",
+            AgentSessionRefKind::Id,
+            "claude-session",
+            &BTreeMap::from([
+                (
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/tmp/claude-home".to_string(),
+                ),
+                ("PATH".to_string(), "/usr/bin".to_string()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            persisted.session_ref.env,
+            BTreeMap::from([(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/tmp/claude-home".to_string(),
+            )])
+        );
+    }
+
+    #[test]
     fn ids_are_data_not_shell_text() {
         let id = "abc; rm -rf /";
         let codex_plan = plan("herdr:codex", "codex", &AgentSessionRef::id(id).unwrap()).unwrap();
@@ -803,49 +940,56 @@ mod tests {
             "herdr:mastracode",
             "mastracode",
             AgentSessionRefKind::Id,
-            "mastracode-session"
+            "mastracode-session",
+            &BTreeMap::new()
         )
         .is_some());
         assert!(session_ref_from_snapshot(
             "herdr:hermes",
             "hermes",
             AgentSessionRefKind::Id,
-            "hermes-session"
+            "hermes-session",
+            &BTreeMap::new()
         )
         .is_some());
         assert!(session_ref_from_snapshot(
             "herdr:opencode",
             "opencode",
             AgentSessionRefKind::Id,
-            "opencode-session"
+            "opencode-session",
+            &BTreeMap::new()
         )
         .is_some());
         assert!(session_ref_from_snapshot(
             "herdr:kilo",
             "kilo",
             AgentSessionRefKind::Id,
-            "kilo-session"
+            "kilo-session",
+            &BTreeMap::new()
         )
         .is_some());
         assert!(session_ref_from_snapshot(
             "herdr:copilot",
             "copilot",
             AgentSessionRefKind::Id,
-            "copilot-session"
+            "copilot-session",
+            &BTreeMap::new()
         )
         .is_some());
         assert!(session_ref_from_snapshot(
             "herdr:devin",
             "devin",
             AgentSessionRefKind::Id,
-            "devin-session"
+            "devin-session",
+            &BTreeMap::new()
         )
         .is_some());
         assert!(session_ref_from_snapshot(
             "herdr:antigravity_cli",
             "agy",
             AgentSessionRefKind::Id,
-            "agy-session"
+            "agy-session",
+            &BTreeMap::new()
         )
         .is_some());
         let agy_session = absolute_test_path("agy-session");

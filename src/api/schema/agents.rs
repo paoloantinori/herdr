@@ -231,4 +231,7 @@ pub struct AgentSessionInfo {
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[schemars(schema_with = "super::common::reported_agent_env_schema")]
+    pub env: std::collections::BTreeMap<String, String>,
 }

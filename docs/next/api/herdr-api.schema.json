@@ -44,6 +44,17 @@
             "agent": {
               "type": "string"
             },
+            "env": {
+              "additionalProperties": {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              "maxProperties": 4,
+              "propertyNames": {
+                "pattern": "^[A-Z_][A-Z0-9_]*$"
+              },
+              "type": "object"
+            },
             "kind": {
               "$ref": "#/schemas/event/$defs/AgentSessionRefKind"
             },
@@ -3046,6 +3057,17 @@
                 "string",
                 "null"
               ]
+            },
+            "env": {
+              "additionalProperties": {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              "maxProperties": 4,
+              "propertyNames": {
+                "pattern": "^[A-Z_][A-Z0-9_]*$"
+              },
+              "type": "object"
             },
             "pane_id": {
               "type": "string"
@@ -6813,6 +6835,17 @@
           "properties": {
             "agent": {
               "type": "string"
+            },
+            "env": {
+              "additionalProperties": {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              "maxProperties": 4,
+              "propertyNames": {
+                "pattern": "^[A-Z_][A-Z0-9_]*$"
+              },
+              "type": "object"
             },
             "kind": {
               "$ref": "#/schemas/success_response/$defs/AgentSessionRefKind"
