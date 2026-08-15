@@ -65,6 +65,7 @@ agent_session_path = transcript_path if isinstance(transcript_path, str) and tra
 session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
 if not isinstance(session_start_source, str) or not session_start_source:
     session_start_source = None
+claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if agent_session_id:
     params = {
         "pane_id": pane_id,
@@ -77,6 +78,8 @@ if agent_session_id:
         params["agent_session_path"] = agent_session_path
     if session_start_source:
         params["session_start_source"] = session_start_source
+    if claude_config_dir:
+        params["env"] = {"CLAUDE_CONFIG_DIR": claude_config_dir}
     request = {
         "id": request_id,
         "method": "pane.report_agent_session",

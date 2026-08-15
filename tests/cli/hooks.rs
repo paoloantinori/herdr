@@ -8,6 +8,19 @@ fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> 
     )
 }
 
+fn run_claude_hook_with_env(
+    action: &str,
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Option<serde_json::Value> {
+    run_shell_hook_with_env(
+        "src/integration/assets/claude/herdr-agent-state.sh",
+        &[action],
+        hook_input,
+        envs,
+    )
+}
+
 fn run_codex_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
     run_shell_hook(
         "src/integration/assets/codex/herdr-agent-state.sh",
@@ -94,6 +107,7 @@ fn run_shell_hook_with_env(
         .env("HERDR_PANE_ID", "p_test")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CURSOR_VERSION")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -158,6 +172,26 @@ fn claude_hook_reports_session_id_from_stdin() {
     assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "claude-session");
     assert!(request["params"].get("state").is_none());
+    assert!(
+        request["params"].get("env").is_none(),
+        "sessions started without CLAUDE_CONFIG_DIR must not report env"
+    );
+}
+
+#[test]
+fn claude_hook_reports_config_dir_env_when_set() {
+    let request = run_claude_hook_with_env(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"claude-session"}"#,
+        &[("CLAUDE_CONFIG_DIR", "/tmp/claude-home")],
+    )
+    .expect("session start should report session identity");
+
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(
+        request["params"]["env"]["CLAUDE_CONFIG_DIR"],
+        "/tmp/claude-home"
+    );
 }
 
 #[test]
