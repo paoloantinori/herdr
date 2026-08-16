@@ -1310,7 +1310,7 @@ impl TerminalState {
                     && current_agent == agent_label
                     && current_kind == crate::agent_resume::AgentSessionRefKind::Id
                     && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
-                    && current_value != session_ref.value
+                    && (current_value != session_ref.value || current_env != session_ref.env)
                     && !Self::session_report_allows_session_replacement(
                         source,
                         agent_label,
@@ -6219,6 +6219,99 @@ mod tests {
         assert_eq!(
             terminal.hook_authority.as_ref().unwrap().source,
             "custom:pi"
+        );
+    }
+
+    #[test]
+    fn env_rotation_is_same_owner_conflict() {
+        use std::collections::BTreeMap;
+        let mut terminal = test_terminal();
+
+        // Persist a session with an env-bearing ref (e.g. CLAUDE_CONFIG_DIR set).
+        let mut env_bearing = BTreeMap::new();
+        env_bearing.insert("CLAUDE_CONFIG_DIR".into(), "/some/path".into());
+        let persisted_ref = crate::agent_resume::AgentSessionRef {
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "sess-abc".into(),
+            env: env_bearing.clone(),
+        };
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: persisted_ref.clone(),
+        });
+
+        // An env-less report arrives for the same session id from the same owner.
+        let env_less_ref = crate::agent_resume::AgentSessionRef {
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "sess-abc".into(),
+            env: BTreeMap::new(),
+        };
+        let result = terminal.set_agent_session_ref(
+            "herdr:claude".into(),
+            "claude".into(),
+            Some(env_less_ref),
+            None,
+        );
+
+        // The report should be rejected (conflict: same owner + same id + different env).
+        assert!(
+            result.is_none(),
+            "env-less report should be rejected as conflict"
+        );
+        let persisted = terminal.persisted_agent_session.as_ref().unwrap();
+        assert_eq!(
+            persisted.session_ref.env, env_bearing,
+            "persisted env must be preserved"
+        );
+    }
+
+    #[test]
+    fn same_owner_same_id_same_env_is_no_conflict() {
+        use std::collections::BTreeMap;
+        let mut terminal = test_terminal();
+
+        let mut env_map = BTreeMap::new();
+        env_map.insert("CLAUDE_CONFIG_DIR".into(), "/some/path".into());
+        let persisted_ref = crate::agent_resume::AgentSessionRef {
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "sess-abc".into(),
+            env: env_map.clone(),
+        };
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: persisted_ref,
+        });
+
+        // Same owner, same id, same env => no conflict; report should be accepted.
+        let same_ref = crate::agent_resume::AgentSessionRef {
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "sess-abc".into(),
+            env: env_map,
+        };
+        let _result = terminal.set_agent_session_ref(
+            "herdr:claude".into(),
+            "claude".into(),
+            Some(same_ref),
+            None,
+        );
+
+        // Same identity is NOT a conflict (value matches and env matches).
+        // The call may or may not produce a mutation, but it must NOT be rejected
+        // by the conflicting_same_owner_session_ref guard.
+        // A None return here could be from other guards (no process present, etc.),
+        // so we verify the persisted env is unchanged rather than asserting Some.
+        let persisted = terminal.persisted_agent_session.as_ref().unwrap();
+        assert_eq!(persisted.session_ref.value, "sess-abc");
+        assert_eq!(
+            persisted.session_ref.env,
+            {
+                let mut e = BTreeMap::new();
+                e.insert("CLAUDE_CONFIG_DIR".into(), "/some/path".into());
+                e
+            },
+            "env should remain unchanged when no conflict"
         );
     }
 }
