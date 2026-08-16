@@ -1310,7 +1310,8 @@ impl TerminalState {
                     && current_agent == agent_label
                     && current_kind == crate::agent_resume::AgentSessionRefKind::Id
                     && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
-                    && (current_value != session_ref.value || current_env != session_ref.env)
+                    && (current_value != session_ref.value
+                        || (!current_env.is_empty() && current_env != session_ref.env))
                     && !Self::session_report_allows_session_replacement(
                         source,
                         agent_label,
@@ -6263,6 +6264,49 @@ mod tests {
         assert_eq!(
             persisted.session_ref.env, env_bearing,
             "persisted env must be preserved"
+        );
+    }
+
+    #[test]
+    fn empty_env_accepts_incoming_env_enrichment() {
+        use std::collections::BTreeMap;
+        let mut terminal = test_terminal();
+
+        // Persist a session with an empty env (typical of v7-era hook records).
+        let persisted_ref = crate::agent_resume::AgentSessionRef {
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "sess-abc".into(),
+            env: BTreeMap::new(),
+        };
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: persisted_ref,
+        });
+
+        // A same-session-id re-report arrives carrying an env (e.g. claude --resume
+        // fires SessionStart with the same id plus CLAUDE_CONFIG_DIR).
+        let mut env_map = BTreeMap::new();
+        env_map.insert("CLAUDE_CONFIG_DIR".into(), "/some/path".into());
+        let enriched_ref = crate::agent_resume::AgentSessionRef {
+            kind: crate::agent_resume::AgentSessionRefKind::Id,
+            value: "sess-abc".into(),
+            env: env_map.clone(),
+        };
+        let _result = terminal.set_agent_session_ref(
+            "herdr:claude".into(),
+            "claude".into(),
+            Some(enriched_ref),
+            None,
+        );
+
+        // The enrichment must NOT be rejected as a conflict.
+        // We verify the persisted env was updated to the incoming value.
+        let persisted = terminal.persisted_agent_session.as_ref().unwrap();
+        assert_eq!(persisted.session_ref.value, "sess-abc");
+        assert_eq!(
+            persisted.session_ref.env, env_map,
+            "empty current env should accept incoming env (enrichment)"
         );
     }
 
