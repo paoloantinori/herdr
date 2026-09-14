@@ -2799,6 +2799,7 @@ mod tests {
                 kind: "pi".into(),
                 pane_id,
                 args: Vec::new(),
+                env: Vec::new(),
                 timeout_ms: Some(1_000),
             }),
         });
@@ -2841,6 +2842,7 @@ mod tests {
                 kind: "codex".into(),
                 pane_id: pane_id.clone(),
                 args: vec!["resume".into(), "codex-session".into()],
+                env: Vec::new(),
                 timeout_ms: Some(4_000),
             }),
         };

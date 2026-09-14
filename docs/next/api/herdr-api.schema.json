@@ -1351,6 +1351,13 @@
               },
               "type": "array"
             },
+            "env": {
+              "description": "KEY=VALUE environment assignments scoped to the started agent via\nan env(1) prefix (unix). Lets `agent start` relaunch a variant\nagent (CLAUDE_CONFIG_DIR) that plain `agent prompt`-driven /exit\nwould leave stranded: without this the start command boots the\ncanonical executable with the default home (2026-09-14 incident).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "kind": {
               "type": "string"
             },

@@ -170,6 +170,13 @@ pub struct AgentStartParams {
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
+    /// KEY=VALUE environment assignments scoped to the started agent via
+    /// an env(1) prefix (unix). Lets `agent start` relaunch a variant
+    /// agent (CLAUDE_CONFIG_DIR) that plain `agent prompt`-driven /exit
+    /// would leave stranded: without this the start command boots the
+    /// canonical executable with the default home (2026-09-14 incident).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
     /// Startup timeout in milliseconds. Values must be greater than 3000 and at most 300000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,

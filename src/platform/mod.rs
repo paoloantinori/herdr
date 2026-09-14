@@ -596,6 +596,28 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
+    fn interactive_shell_command_passes_env_assignments() {
+        // agent start --env path: the typed command must scope CLAUDE_CONFIG_DIR
+        // to the agent via env(1), with KEY=VALUE left unquoted (in the safe
+        // set) so every POSIX shell execs it as one assignment token.
+        let argv = vec![
+            "env".into(),
+            "CLAUDE_CONFIG_DIR=/home/u/.cc-mirror/zai/config".into(),
+            "claude".into(),
+            "--resume".into(),
+            "36157370".into(),
+        ];
+        assert_eq!(
+            interactive_shell_command(&argv, "bash").as_deref(),
+            Some("env CLAUDE_CONFIG_DIR=/home/u/.cc-mirror/zai/config claude --resume 36157370")
+        );
+        assert_eq!(
+            interactive_shell_command(&argv, "zsh").as_deref(),
+            Some("env CLAUDE_CONFIG_DIR=/home/u/.cc-mirror/zai/config claude --resume 36157370")
+        );
+    }
+
+    #[test]
     fn interactive_shell_command_quotes_for_posix_and_powershell() {
         let argv = vec![
             "pi".into(),

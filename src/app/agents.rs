@@ -160,6 +160,22 @@ impl App {
         {
             return Err(AgentStartError::InvalidArgument);
         }
+        // env entries carry the same control-char rule as args, plus the
+        // KEY=VALUE shape: anything else would be typed into the pane
+        // shell as a bare word and silently drop the scoping.
+        if params
+            .env
+            .iter()
+            .any(|entry| entry.chars().any(char::is_control) || entry.split_once('=').is_none())
+        {
+            return Err(AgentStartError::InvalidArgument);
+        }
+        #[cfg(windows)]
+        if !params.env.is_empty() {
+            // Windows pane shells have no env(1); refusing is louder than
+            // starting the agent with the wrong environment.
+            return Err(AgentStartError::InvalidArgument);
+        }
         let persisted_agent_session =
             crate::agent_resume::persisted_session_from_launch_args(kind, &params.args);
         let conflicts = self.agent_name_conflicts(&name, "");
@@ -194,7 +210,16 @@ impl App {
         let shell_name = available_shell_name(runtime)
             .ok_or_else(|| AgentStartError::TargetBusy(params.pane_id.clone()))?;
 
-        let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
+        // env(1) prefix, same shape the deferred agent resume uses: the
+        // assignments scope to the agent process only and stay out of the
+        // pane shell. shell_quote passes KEY=VALUE tokens unquoted (the
+        // '=' is in the safe set), verified by the platform tests.
+        let mut argv = Vec::with_capacity(params.env.len() + params.args.len() + 2);
+        if !params.env.is_empty() {
+            argv.push("env".to_string());
+            argv.extend(params.env.iter().cloned());
+        }
+        argv.push(crate::detect::interactive_agent_executable(kind).to_string());
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
