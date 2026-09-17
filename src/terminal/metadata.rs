@@ -302,6 +302,18 @@ impl TerminalState {
             .display_agent
     }
 
+    /// Human-facing identity for agent notifications: the hook-reported
+    /// display name, then the user-assigned agent name, then the machine
+    /// agent label, then the label captured at state-change time. Mirrors
+    /// the client shell sidebar and mobile rows
+    /// (src/client/shell/agent_sidebar.rs, src/client/shell/mobile.rs).
+    pub fn notification_agent_identity(&self, fallback: &str) -> String {
+        self.newest_metadata_display_agent(Instant::now(), true)
+            .or_else(|| self.agent_name.clone())
+            .or_else(|| self.effective_agent_label().map(str::to_string))
+            .unwrap_or_else(|| fallback.to_string())
+    }
+
     pub fn effective_presentation(&self) -> EffectivePresentation {
         self.effective_presentation_for_state_at(self.state, Instant::now())
     }
