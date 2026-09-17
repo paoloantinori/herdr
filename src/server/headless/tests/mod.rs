@@ -6859,6 +6859,98 @@ fn stale_api_agent_report_does_not_forward_done_sound() {
     );
 }
 
+#[test]
+fn semantic_notification_title_prefers_display_agent_over_machine_label() {
+    let mut server = test_headless_server();
+    let background = crate::workspace::Workspace::test_new("background");
+    let public_pane_id = format!("{}:p1", background.id);
+    let background_pane = background.tabs[0].root_pane;
+    let foreground = crate::workspace::Workspace::test_new("foreground");
+    server.app.state.workspaces = vec![background, foreground];
+    server.app.state.ensure_test_terminals();
+    let terminal_id = server.app.state.workspaces[0]
+        .pane_state(background_pane)
+        .unwrap()
+        .attached_terminal_id
+        .clone();
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::detect::AgentState::Working,
+            None,
+            None,
+        );
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .set_agent_metadata(crate::terminal::AgentMetadataReport {
+            source: "user:status".into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: Some("herdr:claude".into()),
+            title: None,
+            display_agent: Some("zai/herdr".into()),
+            state_labels: Default::default(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_state_labels: false,
+            ttl: None,
+            seq: Some(1),
+        });
+    server.app.state.active = Some(1);
+    server.app.state.selected = 1;
+    server.app.state.mode = crate::app::Mode::Terminal;
+
+    let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+    server.clients.insert(
+        1,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(client_tx),
+        ),
+    );
+
+    let public_pane = server.app.public_pane_id(0, background_pane).unwrap();
+    assert_eq!(public_pane, public_pane_id);
+    assert!(server.forward_semantic_agent_transition(
+        0,
+        background_pane,
+        crate::detect::AgentState::Working,
+        crate::detect::AgentState::Blocked,
+        Some("claude"),
+        Some("claude"),
+        Some(crate::detect::Agent::Claude),
+    ));
+
+    let mut title = None;
+    for _ in 0..4 {
+        let Ok(bytes) = client_control_rx.recv_timeout(Duration::from_millis(100)) else {
+            break;
+        };
+        if let ServerMessage::SemanticNotification(event) = read_server_message(bytes) {
+            title = Some(event.title);
+            break;
+        }
+    }
+    assert_eq!(
+        title.as_deref(),
+        Some("zai/herdr needs attention"),
+        "semantic notification title must use the reported display agent"
+    );
+}
+
 /// Verify that calls to the app's internal-event methods only occur inside
 /// `handle_internal_event_with_forwarding`. This ensures the forwarding
 /// bypass cannot be reintroduced.

@@ -190,16 +190,18 @@ pub fn notification_toast_for_pane_state_update(
     )
 }
 
-fn toast_agent_label(agent_label: &str) -> &str {
-    agent_label
-}
-
 fn toast_event_text(kind: ToastKind) -> &'static str {
     match kind {
         ToastKind::NeedsAttention => "needs attention",
         ToastKind::Finished => "finished",
         ToastKind::UpdateInstalled => "updated",
     }
+}
+
+/// Notification title shared by the TUI toast and the client notification
+/// paths; server-side forwarders use it too so the wording cannot drift.
+pub(crate) fn notification_title(kind: ToastKind, identity: &str) -> String {
+    format!("{identity} {}", toast_event_text(kind))
 }
 
 fn sound_for_toast_kind(
@@ -1942,6 +1944,7 @@ impl AppState {
             active_tab_suppresses_notifications(is_active_tab, self.outer_terminal_focus);
         let sound = sound_for_toast_kind(kind, suppress_active_tab_notifications)
             .filter(|_| self.sound.allows(known_agent));
+        let identity = terminal_state.notification_agent_identity(&agent_label);
         let build_toast = || {
             let workspace_label =
                 self.workspaces[ws_idx].display_name_from_terminals(&self.terminals);
@@ -1949,11 +1952,7 @@ impl AppState {
                 notification_context(&self.workspaces[ws_idx], &workspace_label, ws_idx, pane_id);
             ToastNotification {
                 kind,
-                title: format!(
-                    "{} {}",
-                    toast_agent_label(&agent_label),
-                    toast_event_text(kind)
-                ),
+                title: notification_title(kind, &identity),
                 context,
                 position: None,
                 target: Some(ToastTarget {
@@ -3220,6 +3219,47 @@ mod tests {
         assert_eq!(toast.kind, ToastKind::NeedsAttention);
         assert_eq!(toast.title, "pi needs attention");
         assert_eq!(toast.context, "background · 2");
+    }
+
+    #[test]
+    fn toast_title_prefers_display_agent_over_machine_label() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        let terminal_id = state.workspaces[1].terminal_id(bg_pane_id).unwrap().clone();
+
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_agent_metadata(crate::terminal::AgentMetadataReport {
+                source: "user:status".into(),
+                agent_label: Some("claude".into()),
+                applies_to_source: None,
+                title: None,
+                display_agent: Some("zai/herdr".into()),
+                state_labels: std::collections::HashMap::new(),
+                clear_title: false,
+                clear_display_agent: false,
+                clear_state_labels: false,
+                ttl: None,
+                seq: Some(1),
+            });
+
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Blocked,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        let toast = state.toast.as_ref().unwrap();
+        assert_eq!(toast.kind, ToastKind::NeedsAttention);
+        assert_eq!(toast.title, "zai/herdr needs attention");
     }
 
     #[test]

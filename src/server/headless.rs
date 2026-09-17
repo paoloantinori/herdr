@@ -3265,34 +3265,27 @@ impl HeadlessServer {
                         agent_label.as_deref(),
                     )
                 {
-                    if let Some(agent_label) = self
-                        .app
-                        .state
-                        .terminals
-                        .get(&terminal_id)
-                        .and_then(|terminal| terminal.effective_agent_label())
-                    {
-                        let event_text = match kind {
-                            crate::app::state::ToastKind::NeedsAttention => "needs attention",
-                            crate::app::state::ToastKind::Finished => "finished",
-                            crate::app::state::ToastKind::UpdateInstalled => "updated",
-                        };
-                        let workspace_label = self.app.state.workspaces[*ws_idx].display_name_from(
-                            &self.app.state.terminals,
-                            &self.app.terminal_runtimes,
-                        );
-                        let context = crate::app::actions::notification_context(
-                            &self.app.state.workspaces[*ws_idx],
-                            &workspace_label,
-                            *ws_idx,
-                            *pane_id,
-                        );
-                        self.send_notify_to_foreground_client(
-                            toast_notify_kind(self.app.state.toast_config.delivery)
-                                .expect("toast forwarding requires a client notification kind"),
-                            format!("{agent_label} {event_text}"),
-                            non_empty_body(&context),
-                        );
+                    if let Some(terminal) = self.app.state.terminals.get(&terminal_id) {
+                        if let Some(agent_label) = terminal.effective_agent_label() {
+                            let identity = terminal.notification_agent_identity(agent_label);
+                            let workspace_label = self.app.state.workspaces[*ws_idx]
+                                .display_name_from(
+                                    &self.app.state.terminals,
+                                    &self.app.terminal_runtimes,
+                                );
+                            let context = crate::app::actions::notification_context(
+                                &self.app.state.workspaces[*ws_idx],
+                                &workspace_label,
+                                *ws_idx,
+                                *pane_id,
+                            );
+                            self.send_notify_to_foreground_client(
+                                toast_notify_kind(self.app.state.toast_config.delivery)
+                                    .expect("toast forwarding requires a client notification kind"),
+                                crate::app::actions::notification_title(kind, &identity),
+                                non_empty_body(&context),
+                            );
+                        }
                     }
                 }
             }

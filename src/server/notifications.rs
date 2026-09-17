@@ -34,10 +34,8 @@ pub(crate) fn toast_message_from_state_change(
         .find_map(|(ws_idx, ws)| {
             ws.tabs.iter().find_map(|tab| {
                 let pane = tab.panes.get(&pane_id)?;
-                let agent_label = state
-                    .terminals
-                    .get(&pane.attached_terminal_id)
-                    .and_then(|terminal| terminal.effective_agent_label())?;
+                let terminal = state.terminals.get(&pane.attached_terminal_id)?;
+                let agent_label = terminal.effective_agent_label()?;
                 let kind = app::actions::notification_toast_for_state_change_with_agent_labels(
                     suppress_active_tab_notifications,
                     prev_state,
@@ -46,22 +44,14 @@ pub(crate) fn toast_message_from_state_change(
                     Some(agent_label),
                 )?;
                 let workspace_label = ws.display_name_from(&state.terminals, terminal_runtimes);
+                let identity = terminal.notification_agent_identity(agent_label);
                 Some(format!(
-                    "{} {}: {}",
-                    agent_label,
-                    toast_event_text(kind),
+                    "{}: {}",
+                    app::actions::notification_title(kind, &identity),
                     app::actions::notification_context(ws, &workspace_label, ws_idx, pane_id)
                 ))
             })
         })
-}
-
-fn toast_event_text(kind: app::state::ToastKind) -> &'static str {
-    match kind {
-        app::state::ToastKind::NeedsAttention => "needs attention",
-        app::state::ToastKind::Finished => "finished",
-        app::state::ToastKind::UpdateInstalled => "updated",
-    }
 }
 
 #[cfg(test)]
