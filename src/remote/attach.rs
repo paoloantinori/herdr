@@ -2631,6 +2631,12 @@ fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
         ));
     }
     contents.push_str("Host *\n");
+    // Service connections must not inherit the user's RemoteForward entries:
+    // this transport opens its own sshd connection (its own `-S` control
+    // socket), so a forward the user's ControlMaster already holds cannot be
+    // rebound here, and ExitOnForwardFailure in the user config then kills the
+    // connection before herdr can speak. herdr never uses SSH forwards itself.
+    contents.push_str("  ClearAllForwardings yes\n");
     contents.push_str("  ServerAliveInterval 15\n");
     contents.push_str("  ServerAliveCountMax 4\n");
 
@@ -3441,6 +3447,12 @@ mod tests {
         assert!(
             contents.contains("ServerAliveCountMax 4"),
             "config should set the keepalive count: {contents}"
+        );
+        assert!(
+            contents.contains("ClearAllForwardings yes"),
+            "config must clear inherited forwards: a second sshd session cannot rebind a \
+             listen port the user's ControlMaster already holds, and ExitOnForwardFailure \
+             then kills the connection: {contents}"
         );
         assert!(!contents.contains("ControlMaster"));
         assert!(!contents.contains("ControlPersist"));
