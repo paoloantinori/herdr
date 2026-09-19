@@ -91,6 +91,38 @@ fn workspace_close_group_intent_defaults_false_and_round_trips() {
 }
 
 #[test]
+fn agent_restart_request_round_trips() {
+    let restart = Request {
+        id: "restart".into(),
+        method: Method::AgentRestart(AgentRestartParams {
+            target: "reviewer".into(),
+            cold: true,
+            timeout_ms: Some(8_000),
+        }),
+    };
+    let restart_json = serde_json::to_value(&restart).unwrap();
+    assert_eq!(restart_json["method"], "agent.restart");
+    assert_eq!(restart_json["params"]["cold"], true);
+    assert_eq!(
+        serde_json::from_value::<Request>(restart_json).unwrap(),
+        restart
+    );
+
+    let bare_json = serde_json::json!({
+        "id": "restart-bare",
+        "method": "agent.restart",
+        "params": { "target": "reviewer" },
+    });
+    let bare = serde_json::from_value::<Request>(bare_json).unwrap();
+    let Method::AgentRestart(params) = bare.method else {
+        panic!("expected agent.restart method");
+    };
+    assert_eq!(params.target, "reviewer");
+    assert!(!params.cold);
+    assert_eq!(params.timeout_ms, None);
+}
+
+#[test]
 fn agent_start_and_prompt_requests_round_trip() {
     let start = Request {
         id: "start".into(),
