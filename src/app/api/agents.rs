@@ -12,26 +12,6 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
-// Codex's Windows input reader does not surface bracketed paste. It detects the prompt as a
-// "paste burst" and, while that burst is buffered, rewrites a following Enter into a newline
-// instead of submitting. The burst only flushes after an idle timeout, so any size-based delay is
-// a timing guess that fails when ConPTY delivery lags it. Codex flushes a buffered burst
-// synchronously when it receives a non-character key, so appending one after the paste gives the
-// submission a deterministic paste boundary regardless of prompt size or delivery speed.
-#[cfg(windows)]
-fn append_codex_paste_boundary(runtime: &crate::terminal::TerminalRuntime, text: &mut Vec<u8>) {
-    let keys = match crate::app::api_helpers::encode_api_keys(runtime, &["right".to_string()]) {
-        Ok(keys) => keys,
-        Err(key) => {
-            tracing::warn!(key = %key, "failed to encode Codex paste boundary key");
-            return;
-        }
-    };
-    if let Some(key) = keys.into_iter().find(|bytes| !bytes.is_empty()) {
-        text.extend_from_slice(&key);
-    }
-}
-
 impl App {
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
         encode_success(
@@ -87,14 +67,14 @@ impl App {
         id: String,
         params: AgentRestartParams,
     ) -> String {
-        match self.restart_agent(&params.target, params.cold) {
+        match self.restart_agent(&params.target, params.cold, params.session) {
             Ok(outcome) => encode_success(
                 id,
                 ResponseResult::AgentRestartStopped {
+                    pane_id: outcome.agent.pane_id.clone(),
                     agent: outcome.agent,
                     name: outcome.name,
                     kind: outcome.kind,
-                    pane_id: outcome.pane_id,
                     args: outcome.args,
                     env: outcome.env,
                 },
@@ -220,7 +200,7 @@ impl App {
         #[cfg(windows)]
         let text = if expected_agent == crate::detect::Agent::Codex {
             let mut text = text;
-            append_codex_paste_boundary(runtime, &mut text);
+            crate::app::api_helpers::append_codex_paste_boundary(runtime, &mut text);
             text
         } else {
             text
@@ -835,6 +815,7 @@ mod tests {
                 target: "reviewer".into(),
                 cold: false,
                 timeout_ms: None,
+                session: None,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -895,6 +876,7 @@ mod tests {
                 target: "reviewer".into(),
                 cold: false,
                 timeout_ms: None,
+                session: None,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -931,6 +913,7 @@ mod tests {
                 target: "reviewer".into(),
                 cold: true,
                 timeout_ms: None,
+                session: None,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -963,6 +946,7 @@ mod tests {
                 target: app.public_pane_id(0, pane_id).unwrap(),
                 cold: false,
                 timeout_ms: None,
+                session: None,
             },
         );
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();

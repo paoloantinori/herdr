@@ -66,6 +66,29 @@ pub(super) fn encode_api_submission(
     text
 }
 
+// Codex's Windows input reader does not surface bracketed paste. It detects the prompt as a
+// "paste burst" and, while that burst is buffered, rewrites a following Enter into a newline
+// instead of submitting. The burst only flushes after an idle timeout, so any size-based delay is
+// a timing guess that fails when ConPTY delivery lags it. Codex flushes a buffered burst
+// synchronously when it receives a non-character key, so appending one after the paste gives the
+// submission a deterministic paste boundary regardless of prompt size or delivery speed.
+#[cfg(windows)]
+pub(super) fn append_codex_paste_boundary(
+    runtime: &crate::terminal::TerminalRuntime,
+    text: &mut Vec<u8>,
+) {
+    let keys = match encode_api_keys(runtime, &["right".to_string()]) {
+        Ok(keys) => keys,
+        Err(key) => {
+            tracing::warn!(key = %key, "failed to encode Codex paste boundary key");
+            return;
+        }
+    };
+    if let Some(key) = keys.into_iter().find(|bytes| !bytes.is_empty()) {
+        text.extend_from_slice(&key);
+    }
+}
+
 pub(super) fn encode_api_input(
     runtime: &crate::terminal::TerminalRuntime,
     text: &str,
