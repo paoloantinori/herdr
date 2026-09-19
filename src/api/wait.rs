@@ -176,7 +176,7 @@ pub(super) fn wait_for_agent(
 
 pub(super) fn restart_agent(
     request_id: String,
-    params: crate::api::schema::AgentRestartParams,
+    mut params: crate::api::schema::AgentRestartParams,
     stream: &mut LocalStream,
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
@@ -193,7 +193,7 @@ pub(super) fn restart_agent(
         return restart_error(
             request_id,
             "invalid_agent_timeout",
-            "agent restart timeout must be greater than 3000ms and at most 300000ms",
+            crate::app::INVALID_AGENT_TIMEOUT_MESSAGE,
         )
         .map(Some);
     }
@@ -206,6 +206,10 @@ pub(super) fn restart_agent(
                 .map_err(std::io::Error::other);
         }
     };
+    // Capture the session before the wait-out phase: an agent that exits on
+    // its own mid-wait wipes the persisted session, and the stop phase must
+    // still resume it.
+    params.session = initial.agent_session.clone();
 
     // A working agent is mid-turn: wait it out before interrupting, because
     // interrupting loses the turn's work. --cold skips straight to the stop.
@@ -219,11 +223,7 @@ pub(super) fn restart_agent(
             request_id.clone(),
             ResolvedAgentWait {
                 target: params.target.clone(),
-                until: vec![
-                    crate::api::schema::AgentStatus::Idle,
-                    crate::api::schema::AgentStatus::Done,
-                    crate::api::schema::AgentStatus::Blocked,
-                ],
+                until: agent_wait_statuses(Vec::new()),
                 timeout_ms: deadline.map(|deadline| {
                     deadline
                         .saturating_duration_since(std::time::Instant::now())
@@ -248,6 +248,11 @@ pub(super) fn restart_agent(
     }
 
     // Stop phase: capture the kind and session, then send the family exit.
+    // Residual: the dispatch timeout is 5s, so an app loop stalled that long
+    // at this boundary (or the relaunch one below) reports failure while the
+    // queued request still executes afterwards; its late reply is discarded
+    // by the `let _ = respond_to.send` drop in server/headless.rs. Closing
+    // that window would need the dispatch path to own late replies.
     let stop_response = dispatch_to_app_with_timeout(
         Request {
             id: format!("{request_id}:stop"),
@@ -256,9 +261,13 @@ pub(super) fn restart_agent(
         api_tx,
         Some(APP_RESPONSE_TIMEOUT),
     );
-    let stop: crate::api::schema::SuccessResponse = match response_payload(&stop_response) {
-        Some(payload) => payload,
-        None => return Ok(Some(stop_response)),
+    let stop = match app_response(&request_id, &stop_response) {
+        Ok(AppResponse::Success(success)) => success,
+        Ok(AppResponse::Failure(error)) | Err(error) => {
+            return serde_json::to_string(&error)
+                .map(Some)
+                .map_err(std::io::Error::other);
+        }
     };
     let crate::api::schema::ResponseResult::AgentRestartStopped {
         agent: stopped,
@@ -269,7 +278,12 @@ pub(super) fn restart_agent(
         env,
     } = stop.result
     else {
-        return Ok(Some(stop_response));
+        return restart_error(
+            request_id,
+            "internal_error",
+            "agent restart stop returned an unexpected result",
+        )
+        .map(Some);
     };
 
     // The name is released when the detection loop observes the exit. Holding
@@ -284,11 +298,10 @@ pub(super) fn restart_agent(
             Ok(current) if current.terminal_id == stopped.terminal_id => {}
             Ok(_) => break,
             Err(response) if response.error.code == "agent_not_found" => break,
-            Err(response) => {
-                return serde_json::to_string(&response)
-                    .map(Some)
-                    .map_err(std::io::Error::other);
-            }
+            // The agent is already dead here: any other probe failure is
+            // transient (dispatch timeouts included) and retrying beats
+            // aborting a restart whose relaunch would still have succeeded.
+            Err(_) => {}
         }
         if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
             return restart_error(
@@ -303,34 +316,47 @@ pub(super) fn restart_agent(
 
     // Relaunch in the same pane under the same name, reusing the resume argv
     // built during capture. agent_pane_busy is retried while the pane settles
-    // back to its shell after the exit.
+    // back to its shell after the exit. The start receives the remaining
+    // restart budget, not the original timeout, so its own startup deadline
+    // cannot outlive the caller's.
     let start_request = Request {
         id: format!("{request_id}:start"),
         method: Method::AgentStart(crate::api::schema::AgentStartParams {
-            name,
+            name: name.clone(),
             kind: kind.clone(),
-            pane_id,
+            pane_id: pane_id.clone(),
             args,
             env,
-            timeout_ms: Some(timeout_ms),
+            timeout_ms: remaining_timeout_ms(Some(timeout_ms), started_at),
         }),
     };
-    let start_response = loop {
+    let started = loop {
         if should_stop_connection(stream, running)? {
             return Ok(None);
         }
         let response =
             dispatch_to_app_with_timeout(start_request.clone(), api_tx, Some(APP_RESPONSE_TIMEOUT));
-        if response_error_code(&response).as_deref() != Some("agent_pane_busy")
-            || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
-        {
-            break response;
+        match app_response(&request_id, &response) {
+            Ok(AppResponse::Success(success)) => break success,
+            Ok(AppResponse::Failure(error)) if error.error.code == "agent_pane_busy" => {
+                if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                    return restart_error(
+                        request_id,
+                        "timeout",
+                        format!(
+                            "timed out waiting for pane {pane_id} to settle before relaunching agent {name}"
+                        ),
+                    )
+                    .map(Some);
+                }
+            }
+            Ok(AppResponse::Failure(error)) | Err(error) => {
+                return serde_json::to_string(&error)
+                    .map(Some)
+                    .map_err(std::io::Error::other);
+            }
         }
         std::thread::sleep(CONNECTION_POLL_INTERVAL);
-    };
-    let started: crate::api::schema::SuccessResponse = match response_payload(&start_response) {
-        Some(payload) => payload,
-        None => return Ok(Some(start_response)),
     };
     match started.result {
         crate::api::schema::ResponseResult::AgentStarted { agent, argv } => {
@@ -341,7 +367,12 @@ pub(super) fn restart_agent(
             .map(Some)
             .map_err(std::io::Error::other)
         }
-        _ => Ok(Some(start_response)),
+        _ => restart_error(
+            request_id,
+            "internal_error",
+            "agent restart relaunch returned an unexpected result",
+        )
+        .map(Some),
     }
 }
 
@@ -360,21 +391,37 @@ fn restart_error(
     .map_err(std::io::Error::other)
 }
 
-fn response_error_code(response: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(response)
-        .ok()?
-        .get("error")?
-        .get("code")?
-        .as_str()
-        .map(str::to_owned)
+enum AppResponse {
+    Success(Box<SuccessResponse>),
+    Failure(ErrorResponse),
 }
 
-fn response_payload(response: &str) -> Option<crate::api::schema::SuccessResponse> {
-    let value = serde_json::from_str::<serde_json::Value>(response).ok()?;
-    if value.get("error").is_some() {
-        return None;
+// Envelope decode for the stop/start dispatches, on the same wire shape
+// agent_from_response and client::parse_response_value decode: an error is
+// forwarded under the caller's id (never the synthetic phase id) and an
+// undecodable reply surfaces as a typed internal error instead of a raw
+// pass-through.
+fn app_response(request_id: &str, response: &str) -> Result<AppResponse, ErrorResponse> {
+    let value: serde_json::Value =
+        serde_json::from_str(response).map_err(|_| app_decode_failure(request_id))?;
+    match crate::api::client::parse_response_value(value) {
+        Ok(success) => Ok(AppResponse::Success(Box::new(success))),
+        Err(crate::api::client::ApiClientError::ErrorResponse(mut error)) => {
+            error.id = request_id.into();
+            Ok(AppResponse::Failure(error))
+        }
+        Err(_) => Err(app_decode_failure(request_id)),
     }
-    serde_json::from_value(value).ok()
+}
+
+fn app_decode_failure(request_id: &str) -> ErrorResponse {
+    ErrorResponse {
+        id: request_id.into(),
+        error: ErrorBody {
+            code: "internal_error".into(),
+            message: "failed to decode app response".into(),
+        },
+    }
 }
 
 pub(super) fn prompt_agent(

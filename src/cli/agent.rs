@@ -425,6 +425,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         &expected_kind,
         expected_terminal_id,
         "cli:agent:start",
+        "agent startup",
     );
     match waited {
         Ok(Ok(agent)) => {
@@ -474,12 +475,29 @@ fn agent_restart(args: &[String]) -> std::io::Result<i32> {
         }
     }
 
+    // The server accepts any agent target here, but the ownership handshake
+    // below matches by agent name: resolve the target first so restarting by
+    // pane id does not fail the name check.
+    let resolved = resolve_agent_target(target, "cli:agent:restart")?;
+    if resolved.get("error").is_some() {
+        return super::print_response(&resolved);
+    }
+    let Some(name) = resolved["result"]["agent"]["name"].as_str() else {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:restart",
+            "agent_name_required",
+            "agent restart requires a named agent",
+        ));
+    };
+    let name = name.to_string();
+
     let mut response = super::send_request(&Request {
         id: "cli:agent:restart".into(),
         method: Method::AgentRestart(AgentRestartParams {
             target: target.clone(),
             cold,
             timeout_ms,
+            session: None,
         }),
     })?;
     if response.get("error").is_some() {
@@ -508,12 +526,13 @@ fn agent_restart(args: &[String]) -> std::io::Result<i32> {
         timeout_ms.unwrap_or(crate::app::DEFAULT_AGENT_RESTART_TIMEOUT.as_millis() as u64),
     );
     let waited = wait_for_named_agent(
-        target,
+        &name,
         &pane_id,
         timeout,
         &expected_kind,
         expected_terminal_id,
         "cli:agent:restart",
+        "agent restart",
     );
     match waited {
         Ok(Ok(agent)) => {
@@ -658,6 +677,7 @@ fn wait_for_named_agent(
     expected_kind: &str,
     expected_terminal_id: &str,
     request_id: &str,
+    waiting_for: &str,
 ) -> std::io::Result<Result<serde_json::Value, serde_json::Value>> {
     let deadline = Instant::now().checked_add(timeout);
     let mut first_poll = true;
@@ -666,7 +686,7 @@ fn wait_for_named_agent(
             // Let the server reconcile its matching startup deadline before
             // returning so the pending name is immediately reusable.
             let _ = resolve_agent_target_unchecked(name, &format!("{request_id}:timeout"));
-            return Ok(Err(agent_wait_timeout()));
+            return Ok(Err(agent_wait_timeout(request_id, waiting_for)));
         }
         let poll_id = request_id;
         let mut response = if first_poll {
@@ -812,11 +832,11 @@ fn print_agent_transport_error(
     super::print_response(&cli_agent_error(request_id, code, err.to_string()))
 }
 
-fn agent_wait_timeout() -> serde_json::Value {
+fn agent_wait_timeout(request_id: &str, waiting_for: &str) -> serde_json::Value {
     cli_agent_error(
-        "cli:agent:start",
+        request_id,
         "timeout",
-        "timed out waiting for agent startup",
+        format!("timed out waiting for {waiting_for}"),
     )
 }
 
