@@ -432,6 +432,23 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("restart")
+                .about("Restart a named agent in its own pane")
+                .override_usage("herdr agent restart <NAME> [OPTIONS]")
+                .arg(required("name", "NAME"))
+                .arg(
+                    option("timeout", "MS")
+                        .help("Wait for the exit and relaunch (default: 60000; max: 300000)"),
+                )
+                .arg(
+                    flag("cold")
+                        .help("Interrupt a working agent instead of waiting out its turn"),
+                )
+                .after_help(
+                    "Waits out a working agent before stopping it, then relaunches the same kind in the same pane, resuming the reported session when one exists. The name is released while the pane returns to its shell and is retaken by the relaunch; another client taking it first fails with agent_name_taken.",
+                ),
+        )
+        .subcommand(
             Command::new("explain")
                 .about("Explain agent detection state")
                 .arg(Arg::new("target").value_name("TARGET"))
