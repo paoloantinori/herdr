@@ -1331,6 +1331,17 @@
               "description": "Interrupt a working agent with C-c immediately instead of waiting out\nits turn; for stuck agents.",
               "type": "boolean"
             },
+            "session": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentSessionInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Session captured from the target at restart start. The api server\nfills it from its first resolution and the stop phase reuses it,\nbecause an agent that exits on its own during the wait-out phase\nwipes the persisted session the stop phase would otherwise read."
+            },
             "target": {
               "type": "string"
             },
@@ -1366,6 +1377,47 @@
             "keys"
           ],
           "type": "object"
+        },
+        "AgentSessionInfo": {
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "env": {
+              "additionalProperties": {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              "maxProperties": 4,
+              "propertyNames": {
+                "pattern": "^[A-Z_][A-Z0-9_]*$"
+              },
+              "type": "object"
+            },
+            "kind": {
+              "$ref": "#/schemas/request/$defs/AgentSessionRefKind"
+            },
+            "source": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "agent",
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        "AgentSessionRefKind": {
+          "enum": [
+            "id",
+            "path"
+          ],
+          "type": "string"
         },
         "AgentStartParams": {
           "properties": {

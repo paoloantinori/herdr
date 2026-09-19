@@ -1667,6 +1667,146 @@ fn agent_restart_waits_for_a_working_agent_to_settle() {
 }
 
 #[test]
+fn agent_restart_by_pane_id_resolves_and_restarts_the_named_agent() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let (bin, invocations, _exit_times) = write_fake_claude(&base, true);
+    let herdr = spawn_herdr_with_path(&config_home, &runtime_dir, &socket_path, Some(&bin));
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let started = run_cli_json(
+        &socket_path,
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "claude",
+            "--pane",
+            &pane_id,
+            "--timeout",
+            "10000",
+        ],
+    );
+    assert_eq!(started["result"]["type"], "agent_started");
+
+    // A pane id is a documented agent target: the restart must resolve it to
+    // the agent's name for the ownership handshake instead of reporting
+    // agent_name_not_found after a successful server-side restart.
+    let restarted = run_cli_json(
+        &socket_path,
+        &["agent", "restart", &pane_id, "--timeout", "10000"],
+    );
+    assert_eq!(restarted["result"]["type"], "agent_restarted");
+    assert_eq!(restarted["result"]["kind"], "claude");
+    assert_eq!(restarted["result"]["agent"]["name"], "worker");
+    assert_eq!(
+        restarted["result"]["argv"],
+        serde_json::json!([
+            "env",
+            "CLAUDE_CONFIG_DIR=/tmp/claude-restart-home",
+            "claude",
+            "--resume",
+            "claude-restart-session"
+        ])
+    );
+    assert_eq!(
+        fs::read_to_string(&invocations).unwrap(),
+        "\n--resume\nclaude-restart-session\n"
+    );
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn agent_restart_errors_when_the_foreground_is_not_the_agent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin = base.join("bin");
+    let fake_claude = bin.join("claude");
+    fs::create_dir_all(&bin).unwrap();
+    // On the "swap" prompt the agent is replaced by a sleep with a scrubbed
+    // environment, so the pane foreground stops identifying as any agent
+    // while the terminal still holds the name and the reported label.
+    fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\nexport HERDR_AGENT=claude\n'{herdr}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-claude --agent claude --state idle >/dev/null\nwhile IFS= read -r prompt; do\n  case \"$prompt\" in\n    \"swap\")\n      exec /usr/bin/env -i /bin/sleep 30\n      ;;\n  esac\ndone\n",
+            herdr = env!("CARGO_BIN_EXE_herdr"),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let herdr = spawn_herdr_with_path(&config_home, &runtime_dir, &socket_path, Some(&bin));
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let started = run_cli_json(
+        &socket_path,
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "claude",
+            "--pane",
+            &pane_id,
+            "--timeout",
+            "10000",
+        ],
+    );
+    assert_eq!(started["result"]["type"], "agent_started");
+    assert!(
+        run_cli(&socket_path, &["agent", "prompt", "worker", "swap"])
+            .status
+            .success()
+    );
+    thread::sleep(Duration::from_millis(500));
+
+    let restarted = run_cli(
+        &socket_path,
+        &["agent", "restart", "worker", "--timeout", "10000"],
+    );
+    assert_eq!(restarted.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&restarted.stderr).unwrap();
+    // The stop phase must fail under the caller's id instead of reporting a
+    // stopped agent whose exit wait would then spin to the deadline.
+    assert_eq!(error["id"], "cli:agent:restart");
+    assert_eq!(
+        error["error"]["code"],
+        "agent_restart_foreground_unidentified"
+    );
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("could not be identified as claude"));
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
 fn agent_restart_of_an_unknown_name_errors() {
     let base = unique_test_dir();
     let config_home = base.join("config");

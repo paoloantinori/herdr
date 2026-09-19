@@ -11,7 +11,7 @@ const DEFAULT_AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_AGENT_RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const MAX_AGENT_START_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const AGENT_START_SETTLE_DELAY: Duration = Duration::from_secs(3);
-const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
+pub(crate) const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
     "agent start timeout must be greater than 3000ms and at most 300000ms";
 const INVALID_AGENT_NAME_MESSAGE: &str = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
 
@@ -263,13 +263,17 @@ impl App {
         &mut self,
         target: &str,
         cold: bool,
+        captured_session: Option<crate::api::schema::AgentSessionInfo>,
     ) -> Result<AgentRestartOutcome, AgentRestartError> {
         let resolved = self
             .resolve_agent_target(target)
             .map_err(AgentRestartError::Target)?;
         // Capture before the exit: the exit observation wipes the hook
         // authority, the persisted session, and eventually the name, so the
-        // relaunch recipe must be read off the live state first.
+        // relaunch recipe must be read off the live state first. A session
+        // captured at restart start still covers an agent that exited on its
+        // own during the wait-out phase; a fresher live report wins when the
+        // agent ran another turn in between.
         let agent = self
             .agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| {
@@ -289,6 +293,7 @@ impl App {
         let session = agent
             .agent_session
             .as_ref()
+            .or(captured_session.as_ref())
             .filter(|session| crate::detect::parse_agent_label(&session.agent) == Some(kind));
         // The relaunch reuses the resume planner so a restarted session is
         // typed exactly as a deferred restore would type it.
@@ -307,34 +312,26 @@ impl App {
             .as_ref()
             .map(|plan| plan.argv[1..].to_vec())
             .unwrap_or_default();
-        let env = resume_plan
-            .map(|plan| {
-                plan.env
-                    .iter()
-                    .map(|(name, value)| format!("{name}={value}"))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let env = restart_env_entries(resume_plan.as_ref());
 
         let runtime = self
             .lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| AgentRestartError::TargetUnavailable(agent.pane_id.clone()))?;
-        // When the named agent's process is already gone the exit bytes would
-        // land in the pane shell instead, so send nothing and let the caller
-        // wait out the pending name release.
-        if runtime_hosts_agent(runtime, kind) {
-            let exit = restart_exit_bytes(runtime, kind, cold)?;
-            runtime
-                .try_send_bytes(Bytes::from(exit))
-                .map_err(|err| AgentRestartError::InputFailed(err.to_string()))?;
+        // The exit bytes must reach the agent itself: typed into anything
+        // else they would run a command in a shell or a foreign process, and
+        // staying silent instead would leave the caller's exit wait spinning
+        // on a pane whose foreground never was the agent.
+        if !runtime_hosts_agent(runtime, kind) {
+            return Err(AgentRestartError::ForegroundUnidentified(kind_label));
         }
+        let exit = restart_exit_bytes(runtime, kind, cold)?;
+        runtime
+            .try_send_bytes(Bytes::from(exit))
+            .map_err(|err| AgentRestartError::InputFailed(err.to_string()))?;
         Ok(AgentRestartOutcome {
             agent,
             name,
             kind: kind_label,
-            pane_id: self
-                .public_pane_id(resolved.ws_idx, resolved.pane_id)
-                .unwrap_or_default(),
             args,
             env,
         })
@@ -420,6 +417,12 @@ impl App {
             AgentRestartError::TargetUnavailable(target) => crate::api::schema::ErrorBody {
                 code: "agent_pane_unavailable".into(),
                 message: format!("agent target pane {target} has no live terminal"),
+            },
+            AgentRestartError::ForegroundUnidentified(kind) => crate::api::schema::ErrorBody {
+                code: "agent_restart_foreground_unidentified".into(),
+                message: format!(
+                    "foreground process in the target pane could not be identified as {kind}, so no exit was sent"
+                ),
             },
             AgentRestartError::InputFailed(message) => crate::api::schema::ErrorBody {
                 code: "agent_restart_input_failed".into(),
@@ -578,7 +581,17 @@ fn restart_exit_bytes(
     }
     match kind {
         crate::detect::Agent::Claude | crate::detect::Agent::Codex => {
-            bytes.extend(super::api_helpers::encode_api_submission(runtime, "/exit"));
+            // Submission split with the Codex Windows paste boundary (see
+            // append_codex_paste_boundary) so the /exit Enter submits instead
+            // of being swallowed by a buffered paste burst.
+            let (mut submission, enter) =
+                super::api_helpers::encode_api_submission_parts(runtime, "/exit");
+            #[cfg(windows)]
+            if kind == crate::detect::Agent::Codex {
+                super::api_helpers::append_codex_paste_boundary(runtime, &mut submission);
+            }
+            submission.extend_from_slice(&enter);
+            bytes.extend(submission);
         }
         _ => interrupt(&mut bytes)?,
     }
@@ -591,6 +604,27 @@ fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<St
         return Some("sh".into());
     }
     crate::platform::available_pane_shell(runtime.child_pid()?)
+}
+
+#[cfg(unix)]
+fn restart_env_entries(plan: Option<&crate::agent_resume::AgentResumePlan>) -> Vec<String> {
+    plan.map(|plan| {
+        plan.env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+// start_agent refuses non-empty env on Windows (pane shells have no env(1)),
+// and by relaunch time the stop phase has already killed the agent. Degrade
+// to an env-less relaunch the way deferred resume does
+// (agent_resume::shell_command_from_resume_plan) instead of stranding the
+// pane with no agent at all.
+#[cfg(windows)]
+fn restart_env_entries(_plan: Option<&crate::agent_resume::AgentResumePlan>) -> Vec<String> {
+    Vec::new()
 }
 
 pub(super) fn runtime_hosts_agent(
@@ -634,7 +668,6 @@ pub(super) struct AgentRestartOutcome {
     pub agent: crate::api::schema::AgentInfo,
     pub name: String,
     pub kind: String,
-    pub pane_id: String,
     pub args: Vec<String>,
     pub env: Vec<String>,
 }
@@ -645,6 +678,7 @@ pub(super) enum AgentRestartError {
     Unnamed,
     UnsupportedKind(String),
     TargetUnavailable(String),
+    ForegroundUnidentified(String),
     InputFailed(String),
 }
 

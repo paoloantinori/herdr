@@ -98,11 +98,24 @@ fn agent_restart_request_round_trips() {
             target: "reviewer".into(),
             cold: true,
             timeout_ms: Some(8_000),
+            session: Some(AgentSessionInfo {
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                kind: crate::agent_resume::AgentSessionRefKind::Id,
+                value: "session-1".into(),
+                env: [(
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    "/tmp/claude-home".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            }),
         }),
     };
     let restart_json = serde_json::to_value(&restart).unwrap();
     assert_eq!(restart_json["method"], "agent.restart");
     assert_eq!(restart_json["params"]["cold"], true);
+    assert_eq!(restart_json["params"]["session"]["value"], "session-1");
     assert_eq!(
         serde_json::from_value::<Request>(restart_json).unwrap(),
         restart
@@ -120,6 +133,7 @@ fn agent_restart_request_round_trips() {
     assert_eq!(params.target, "reviewer");
     assert!(!params.cold);
     assert_eq!(params.timeout_ms, None);
+    assert_eq!(params.session, None);
 }
 
 #[test]

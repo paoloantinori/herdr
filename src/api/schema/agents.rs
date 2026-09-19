@@ -193,6 +193,12 @@ pub struct AgentRestartParams {
     /// exit, and the relaunch. Values must be greater than 3000 and at most 300000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Session captured from the target at restart start. The api server
+    /// fills it from its first resolution and the stop phase reuses it,
+    /// because an agent that exits on its own during the wait-out phase
+    /// wipes the persisted session the stop phase would otherwise read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AgentSessionInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
