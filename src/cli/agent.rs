@@ -2,8 +2,9 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentRestartParams, AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams,
+    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat,
+    ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -26,6 +27,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
+        "restart" => agent_restart(&args[1..]),
         "explain" => agent_explain(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
@@ -432,6 +434,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         timeout,
         &expected_kind,
         expected_terminal_id,
+        "cli:agent:start",
     );
     match waited {
         Ok(Ok(agent)) => {
@@ -441,6 +444,95 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         Ok(Err(error)) => super::print_response(&error),
         Err(err) => {
             print_agent_transport_error(err, "cli:agent:start", "agent_start_transport_failed")
+        }
+    }
+}
+
+fn agent_restart(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent restart <name> [--timeout MS] [--cold]");
+        return Ok(2);
+    };
+    let mut timeout_ms = None;
+    let mut cold = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--timeout" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --timeout");
+                    return Ok(2);
+                };
+                timeout_ms = match parse_timeout(value) {
+                    Ok(timeout_ms) => Some(timeout_ms),
+                    Err(exit_code) => return Ok(exit_code),
+                };
+                index += 2;
+            }
+            "--cold" => {
+                cold = true;
+                index += 1;
+            }
+            "help" | "--help" | "-h" => {
+                eprintln!("usage: herdr agent restart <name> [--timeout MS] [--cold]");
+                return Ok(0);
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+        }
+    }
+
+    let mut response = super::send_request(&Request {
+        id: "cli:agent:restart".into(),
+        method: Method::AgentRestart(AgentRestartParams {
+            target: target.clone(),
+            cold,
+            timeout_ms,
+        }),
+    })?;
+    if response.get("error").is_some() {
+        return super::print_response(&response);
+    }
+    let Some(expected_terminal_id) = response["result"]["agent"]["terminal_id"].as_str() else {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:restart",
+            "agent_restart_failed",
+            "agent restart response did not include terminal_id",
+        ));
+    };
+    let Some(expected_kind) = response["result"]["kind"].as_str() else {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:restart",
+            "agent_restart_failed",
+            "agent restart response did not include the restarted kind",
+        ));
+    };
+    let expected_kind = expected_kind.to_string();
+    let pane_id = response["result"]["agent"]["pane_id"]
+        .as_str()
+        .unwrap_or(target)
+        .to_string();
+    let timeout = Duration::from_millis(
+        timeout_ms.unwrap_or(crate::app::DEFAULT_AGENT_RESTART_TIMEOUT.as_millis() as u64),
+    );
+    let waited = wait_for_named_agent(
+        target,
+        &pane_id,
+        timeout,
+        &expected_kind,
+        expected_terminal_id,
+        "cli:agent:restart",
+    );
+    match waited {
+        Ok(Ok(agent)) => {
+            response["result"]["agent"] = agent;
+            super::print_response(&response)
+        }
+        Ok(Err(error)) => super::print_response(&error),
+        Err(err) => {
+            print_agent_transport_error(err, "cli:agent:restart", "agent_restart_transport_failed")
         }
     }
 }
@@ -575,6 +667,7 @@ fn wait_for_named_agent(
     timeout: Duration,
     expected_kind: &str,
     expected_terminal_id: &str,
+    request_id: &str,
 ) -> std::io::Result<Result<serde_json::Value, serde_json::Value>> {
     let deadline = Instant::now().checked_add(timeout);
     let mut first_poll = true;
@@ -582,10 +675,10 @@ fn wait_for_named_agent(
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             // Let the server reconcile its matching startup deadline before
             // returning so the pending name is immediately reusable.
-            let _ = resolve_agent_target_unchecked(name, "cli:agent:start:timeout");
+            let _ = resolve_agent_target_unchecked(name, &format!("{request_id}:timeout"));
             return Ok(Err(agent_wait_timeout()));
         }
-        let poll_id = "cli:agent:start";
+        let poll_id = request_id;
         let mut response = if first_poll {
             first_poll = false;
             resolve_agent_target(name, poll_id)?
@@ -601,22 +694,22 @@ fn wait_for_named_agent(
         }
         let agent = &response["result"]["agent"];
         let outcome = if agent["terminal_id"].as_str() != Some(expected_terminal_id) {
-            Some(Err(agent_name_lost_error("cli:agent:start", name)))
+            Some(Err(agent_name_lost_error(request_id, name)))
         } else if let Some(actual) = agent["agent"]
             .as_str()
             .filter(|actual| *actual != expected_kind)
         {
             Some(Err(cli_agent_error(
-                "cli:agent:start",
+                request_id,
                 "agent_kind_mismatch",
                 format!("expected {expected_kind}, detected {actual}"),
             )))
         } else if agent["name"].as_str() != Some(name) {
-            Some(Err(agent_name_lost_error("cli:agent:start", name)))
+            Some(Err(agent_name_lost_error(request_id, name)))
         } else {
             match agent["agent_status"].as_str() {
                 Some("blocked") => Some(Err(cli_agent_error(
-                    "cli:agent:start",
+                    request_id,
                     "agent_not_ready",
                     format!("agent {name} is blocked during startup and is not ready for prompts"),
                 ))),
@@ -626,7 +719,7 @@ fn wait_for_named_agent(
                 }
                 Some("idle" | "done") if !agent["launch_pending"].as_bool().unwrap_or(false) => {
                     Some(Err(cli_agent_error(
-                        "cli:agent:start",
+                        request_id,
                         "agent_start_failed",
                         "agent process exited before becoming interactive",
                     )))
@@ -947,6 +1040,7 @@ fn print_agent_help() {
     eprintln!(
         "  herdr agent start <name> --kind KIND --pane ID [--env KEY=VALUE]... [--timeout MS] [-- <agent-args...>]"
     );
+    eprintln!("  herdr agent restart <name> [--timeout MS] [--cold]");
     eprintln!("  herdr agent explain <target> [--json|--format text|json] [--verbose]");
     eprintln!(
         "  herdr agent explain --file PATH --agent LABEL [--json|--format text|json] [--verbose]"
