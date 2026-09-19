@@ -6,6 +6,9 @@ use super::{terminal_targets::TerminalTargetError, App};
 use crate::api::schema::AgentStartParams;
 
 const DEFAULT_AGENT_START_TIMEOUT: Duration = Duration::from_secs(30);
+// A restart must first wait out an active turn, so its default grace is
+// longer than a plain start's.
+pub(crate) const DEFAULT_AGENT_RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const MAX_AGENT_START_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const AGENT_START_SETTLE_DELAY: Duration = Duration::from_secs(3);
 const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
@@ -256,6 +259,87 @@ impl App {
         Ok((agent, argv))
     }
 
+    pub(super) fn restart_agent(
+        &mut self,
+        target: &str,
+        cold: bool,
+    ) -> Result<AgentRestartOutcome, AgentRestartError> {
+        let resolved = self
+            .resolve_agent_target(target)
+            .map_err(AgentRestartError::Target)?;
+        // Capture before the exit: the exit observation wipes the hook
+        // authority, the persisted session, and eventually the name, so the
+        // relaunch recipe must be read off the live state first.
+        let agent = self
+            .agent_info(resolved.ws_idx, resolved.pane_id)
+            .ok_or_else(|| {
+                AgentRestartError::Target(TerminalTargetError::NotFound {
+                    target: target.to_string(),
+                })
+            })?;
+        let Some(name) = agent.name.clone() else {
+            return Err(AgentRestartError::Unnamed);
+        };
+        let kind_label = agent.agent.clone().ok_or(AgentRestartError::NotAgent)?;
+        let Some(kind) = crate::detect::parse_agent_label(&kind_label) else {
+            return Err(AgentRestartError::UnsupportedKind(kind_label));
+        };
+        // A session reported for another occupant of the pane must not be
+        // resumed against this kind.
+        let session = agent
+            .agent_session
+            .as_ref()
+            .filter(|session| crate::detect::parse_agent_label(&session.agent) == Some(kind));
+        // The relaunch reuses the resume planner so a restarted session is
+        // typed exactly as a deferred restore would type it.
+        let resume_plan = session.and_then(|session| {
+            crate::agent_resume::plan(
+                &session.source,
+                &session.agent,
+                &crate::agent_resume::AgentSessionRef {
+                    kind: session.kind,
+                    value: session.value.clone(),
+                    env: session.env.clone(),
+                },
+            )
+        });
+        let args = resume_plan
+            .as_ref()
+            .map(|plan| plan.argv[1..].to_vec())
+            .unwrap_or_default();
+        let env = resume_plan
+            .map(|plan| {
+                plan.env
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let runtime = self
+            .lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)
+            .ok_or_else(|| AgentRestartError::TargetUnavailable(agent.pane_id.clone()))?;
+        // When the named agent's process is already gone the exit bytes would
+        // land in the pane shell instead, so send nothing and let the caller
+        // wait out the pending name release.
+        if runtime_hosts_agent(runtime, kind) {
+            let exit = restart_exit_bytes(runtime, kind, cold)?;
+            runtime
+                .try_send_bytes(Bytes::from(exit))
+                .map_err(|err| AgentRestartError::InputFailed(err.to_string()))?;
+        }
+        Ok(AgentRestartOutcome {
+            agent,
+            name,
+            kind: kind_label,
+            pane_id: self
+                .public_pane_id(resolved.ws_idx, resolved.pane_id)
+                .unwrap_or_default(),
+            args,
+            env,
+        })
+    }
+
     pub(super) fn agent_start_error_body(
         &self,
         err: AgentStartError,
@@ -311,6 +395,35 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("; ")
                 ),
+            },
+        }
+    }
+
+    pub(super) fn agent_restart_error_body(
+        &self,
+        err: AgentRestartError,
+    ) -> crate::api::schema::ErrorBody {
+        match err {
+            AgentRestartError::Target(err) => self.agent_target_error_body(err),
+            AgentRestartError::NotAgent => crate::api::schema::ErrorBody {
+                code: "agent_not_found".into(),
+                message: "agent target does not currently host an agent".into(),
+            },
+            AgentRestartError::Unnamed => crate::api::schema::ErrorBody {
+                code: "agent_name_required".into(),
+                message: "agent restart requires a named agent".into(),
+            },
+            AgentRestartError::UnsupportedKind(kind) => crate::api::schema::ErrorBody {
+                code: "unsupported_agent_kind".into(),
+                message: format!("unsupported interactive agent kind {kind}"),
+            },
+            AgentRestartError::TargetUnavailable(target) => crate::api::schema::ErrorBody {
+                code: "agent_pane_unavailable".into(),
+                message: format!("agent target pane {target} has no live terminal"),
+            },
+            AgentRestartError::InputFailed(message) => crate::api::schema::ErrorBody {
+                code: "agent_restart_input_failed".into(),
+                message,
             },
         }
     }
@@ -440,6 +553,38 @@ impl App {
     }
 }
 
+// Exit vocabulary: claude and codex end a session on a typed /exit, the same
+// submission an `agent prompt`-driven exit makes; every other family has no
+// shared exit command, so it gets the C-c interrupt a user would press.
+// --cold prepends C-c so a stuck mid-turn agent is interrupted before its
+// family exit is submitted; for the C-c families that is the usual double
+// interrupt hard exit.
+fn restart_exit_bytes(
+    runtime: &crate::terminal::TerminalRuntime,
+    kind: crate::detect::Agent,
+    cold: bool,
+) -> Result<Vec<u8>, AgentRestartError> {
+    let interrupt = |bytes: &mut Vec<u8>| {
+        let encoded =
+            super::api_helpers::encode_api_keys(runtime, &["C-c".to_string()]).map_err(|key| {
+                AgentRestartError::InputFailed(format!("failed to encode restart exit key {key}"))
+            })?;
+        bytes.extend(encoded.into_iter().flatten());
+        Ok(())
+    };
+    let mut bytes = Vec::new();
+    if cold {
+        interrupt(&mut bytes)?;
+    }
+    match kind {
+        crate::detect::Agent::Claude | crate::detect::Agent::Codex => {
+            bytes.extend(super::api_helpers::encode_api_submission(runtime, "/exit"));
+        }
+        _ => interrupt(&mut bytes)?,
+    }
+    Ok(bytes)
+}
+
 fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<String> {
     #[cfg(test)]
     if runtime.child_pid().is_none() {
@@ -483,6 +628,24 @@ pub(super) enum AgentStartError {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,
     },
+}
+
+pub(super) struct AgentRestartOutcome {
+    pub agent: crate::api::schema::AgentInfo,
+    pub name: String,
+    pub kind: String,
+    pub pane_id: String,
+    pub args: Vec<String>,
+    pub env: Vec<String>,
+}
+
+pub(super) enum AgentRestartError {
+    Target(TerminalTargetError),
+    NotAgent,
+    Unnamed,
+    UnsupportedKind(String),
+    TargetUnavailable(String),
+    InputFailed(String),
 }
 
 pub(super) enum AgentRenameError {

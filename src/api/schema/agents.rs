@@ -183,6 +183,19 @@ pub struct AgentStartParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentRestartParams {
+    pub target: String,
+    /// Interrupt a working agent with C-c immediately instead of waiting out
+    /// its turn; for stuck agents.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub cold: bool,
+    /// Timeout in milliseconds covering the wait for a working agent, its
+    /// exit, and the relaunch. Values must be greater than 3000 and at most 300000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentPromptParams {
     pub target: String,
     pub text: String,

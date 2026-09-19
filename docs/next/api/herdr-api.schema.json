@@ -1325,6 +1325,30 @@
           ],
           "type": "object"
         },
+        "AgentRestartParams": {
+          "properties": {
+            "cold": {
+              "description": "Interrupt a working agent with C-c immediately instead of waiting out\nits turn; for stuck agents.",
+              "type": "boolean"
+            },
+            "target": {
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Timeout in milliseconds covering the wait for a working agent, its\nexit, and the relaunch. Values must be greater than 3000 and at most 300000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -5483,6 +5507,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.restart",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentRestartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.prompt",
               "type": "string"
             },
@@ -9580,6 +9620,75 @@
                 "type",
                 "agent",
                 "argv"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "args": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "env": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_restart_stopped",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent",
+                "name",
+                "kind",
+                "pane_id",
+                "args",
+                "env"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "argv": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "agent_restarted",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent",
+                "argv",
+                "kind"
               ],
               "type": "object"
             },
