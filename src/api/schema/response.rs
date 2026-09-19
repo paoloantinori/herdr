@@ -101,6 +101,19 @@ pub enum ResponseResult {
         agent: AgentInfo,
         argv: Vec<String>,
     },
+    AgentRestartStopped {
+        agent: AgentInfo,
+        name: String,
+        kind: String,
+        pane_id: String,
+        args: Vec<String>,
+        env: Vec<String>,
+    },
+    AgentRestarted {
+        agent: AgentInfo,
+        argv: Vec<String>,
+        kind: String,
+    },
     AgentPrompted {
         agent: AgentInfo,
     },

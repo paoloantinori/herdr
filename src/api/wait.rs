@@ -174,6 +174,209 @@ pub(super) fn wait_for_agent(
     }
 }
 
+pub(super) fn restart_agent(
+    request_id: String,
+    params: crate::api::schema::AgentRestartParams,
+    stream: &mut LocalStream,
+    api_tx: &ApiRequestSender,
+    event_hub: &EventHub,
+    running: &Arc<AtomicBool>,
+) -> std::io::Result<Option<String>> {
+    let started_at = std::time::Instant::now();
+    let timeout_ms = params
+        .timeout_ms
+        .unwrap_or(crate::app::DEFAULT_AGENT_RESTART_TIMEOUT.as_millis() as u64);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    if timeout <= crate::app::AGENT_START_SETTLE_DELAY
+        || timeout > crate::app::MAX_AGENT_START_TIMEOUT
+    {
+        return restart_error(
+            request_id,
+            "invalid_agent_timeout",
+            "agent restart timeout must be greater than 3000ms and at most 300000ms",
+        )
+        .map(Some);
+    }
+    let deadline = started_at.checked_add(timeout);
+    let initial = match agent_get(&request_id, &params.target, api_tx) {
+        Ok(agent) => agent,
+        Err(response) => {
+            return serde_json::to_string(&response)
+                .map(Some)
+                .map_err(std::io::Error::other);
+        }
+    };
+
+    // A working agent is mid-turn: wait it out before interrupting, because
+    // interrupting loses the turn's work. --cold skips straight to the stop.
+    if !params.cold
+        && matches!(
+            initial.agent_status,
+            crate::api::schema::AgentStatus::Working | crate::api::schema::AgentStatus::Unknown
+        )
+    {
+        let outcome = wait_for_resolved_agent(
+            request_id.clone(),
+            ResolvedAgentWait {
+                target: params.target.clone(),
+                until: vec![
+                    crate::api::schema::AgentStatus::Idle,
+                    crate::api::schema::AgentStatus::Done,
+                    crate::api::schema::AgentStatus::Blocked,
+                ],
+                timeout_ms: deadline.map(|deadline| {
+                    deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_millis() as u64
+                }),
+                initial,
+                last_event_sequence: event_hub.current_sequence(),
+                after_state_change_seq: None,
+                accept_transient_status: true,
+                timeout_kind: AgentWaitTimeoutKind::Status,
+            },
+            stream,
+            api_tx,
+            event_hub,
+            running,
+        )?;
+        match outcome {
+            Some(AgentWaitOutcome::Matched(_)) => {}
+            Some(AgentWaitOutcome::Response(response)) => return Ok(Some(response)),
+            None => return Ok(None),
+        }
+    }
+
+    // Stop phase: capture the kind and session, then send the family exit.
+    let stop_response = dispatch_to_app_with_timeout(
+        Request {
+            id: format!("{request_id}:stop"),
+            method: Method::AgentRestart(params),
+        },
+        api_tx,
+        Some(APP_RESPONSE_TIMEOUT),
+    );
+    let stop: crate::api::schema::SuccessResponse = match response_payload(&stop_response) {
+        Some(payload) => payload,
+        None => return Ok(Some(stop_response)),
+    };
+    let crate::api::schema::ResponseResult::AgentRestartStopped {
+        agent: stopped,
+        name,
+        kind,
+        pane_id,
+        args,
+        env,
+    } = stop.result
+    else {
+        return Ok(Some(stop_response));
+    };
+
+    // The name is released when the detection loop observes the exit. Holding
+    // it through the transition would mean fighting that loop, so accept the
+    // release and relaunch immediately; another client taking the name in the
+    // window gets an honest agent_name_taken from the start below.
+    loop {
+        if should_stop_connection(stream, running)? {
+            return Ok(None);
+        }
+        match agent_get(&request_id, &name, api_tx) {
+            Ok(current) if current.terminal_id == stopped.terminal_id => {}
+            Ok(_) => break,
+            Err(response) if response.error.code == "agent_not_found" => break,
+            Err(response) => {
+                return serde_json::to_string(&response)
+                    .map(Some)
+                    .map_err(std::io::Error::other);
+            }
+        }
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            return restart_error(
+                request_id,
+                "timeout",
+                format!("timed out waiting for agent {name} to exit"),
+            )
+            .map(Some);
+        }
+        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+    }
+
+    // Relaunch in the same pane under the same name, reusing the resume argv
+    // built during capture. agent_pane_busy is retried while the pane settles
+    // back to its shell after the exit.
+    let start_request = Request {
+        id: format!("{request_id}:start"),
+        method: Method::AgentStart(crate::api::schema::AgentStartParams {
+            name,
+            kind: kind.clone(),
+            pane_id,
+            args,
+            env,
+            timeout_ms: Some(timeout_ms),
+        }),
+    };
+    let start_response = loop {
+        if should_stop_connection(stream, running)? {
+            return Ok(None);
+        }
+        let response =
+            dispatch_to_app_with_timeout(start_request.clone(), api_tx, Some(APP_RESPONSE_TIMEOUT));
+        if response_error_code(&response).as_deref() != Some("agent_pane_busy")
+            || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            break response;
+        }
+        std::thread::sleep(CONNECTION_POLL_INTERVAL);
+    };
+    let started: crate::api::schema::SuccessResponse = match response_payload(&start_response) {
+        Some(payload) => payload,
+        None => return Ok(Some(start_response)),
+    };
+    match started.result {
+        crate::api::schema::ResponseResult::AgentStarted { agent, argv } => {
+            serde_json::to_string(&SuccessResponse {
+                id: request_id,
+                result: crate::api::schema::ResponseResult::AgentRestarted { agent, argv, kind },
+            })
+            .map(Some)
+            .map_err(std::io::Error::other)
+        }
+        _ => Ok(Some(start_response)),
+    }
+}
+
+fn restart_error(
+    request_id: String,
+    code: &str,
+    message: impl Into<String>,
+) -> std::io::Result<String> {
+    serde_json::to_string(&ErrorResponse {
+        id: request_id,
+        error: ErrorBody {
+            code: code.into(),
+            message: message.into(),
+        },
+    })
+    .map_err(std::io::Error::other)
+}
+
+fn response_error_code(response: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(response)
+        .ok()?
+        .get("error")?
+        .get("code")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn response_payload(response: &str) -> Option<crate::api::schema::SuccessResponse> {
+    let value = serde_json::from_str::<serde_json::Value>(response).ok()?;
+    if value.get("error").is_some() {
+        return None;
+    }
+    serde_json::from_value(value).ok()
+}
+
 pub(super) fn prompt_agent(
     request_id: String,
     mut params: crate::api::schema::AgentPromptParams,

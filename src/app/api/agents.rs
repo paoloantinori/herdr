@@ -3,8 +3,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    AgentPromptParams, AgentRenameParams, AgentRestartParams, AgentSendKeysParams,
+    AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -77,6 +77,30 @@ impl App {
         };
 
         encode_success(id, ResponseResult::AgentStarted { agent, argv })
+    }
+
+    // The api server's restart orchestrator drives this handler for the
+    // atomic capture + exit step and runs the wait and relaunch phases on the
+    // connection thread; the app loop must never block on an agent exiting.
+    pub(super) fn handle_agent_restart(
+        &mut self,
+        id: String,
+        params: AgentRestartParams,
+    ) -> String {
+        match self.restart_agent(&params.target, params.cold) {
+            Ok(outcome) => encode_success(
+                id,
+                ResponseResult::AgentRestartStopped {
+                    agent: outcome.agent,
+                    name: outcome.name,
+                    kind: outcome.kind,
+                    pane_id: outcome.pane_id,
+                    args: outcome.args,
+                    env: outcome.env,
+                },
+            ),
+            Err(err) => encode_error_body(id, self.agent_restart_error_body(err)),
+        }
     }
 
     pub(crate) fn handle_deferred_agent_api_request(
@@ -790,6 +814,163 @@ mod tests {
             panic!("expected agent info response");
         };
         assert_eq!(agent.agent_status, AgentStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn agent_restart_sends_the_interrupt_family_exit_without_a_session() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_agent_restart(
+            "req".into(),
+            AgentRestartParams {
+                target: "reviewer".into(),
+                cold: false,
+                timeout_ms: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentRestartStopped {
+            agent,
+            name,
+            kind,
+            pane_id: restart_pane_id,
+            args,
+            env,
+        } = success.result
+        else {
+            panic!("expected agent_restart_stopped response");
+        };
+        assert_eq!(name, "reviewer");
+        assert_eq!(kind, "opencode");
+        assert!(!restart_pane_id.is_empty());
+        assert!(
+            args.is_empty(),
+            "no session means a plain restart: {args:?}"
+        );
+        assert!(env.is_empty());
+        assert_eq!(agent.name.as_deref(), Some("reviewer"));
+        // OpenCode is not a typed-/exit family, so the exit is a C-c interrupt.
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\x03"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_restart_types_the_exit_for_claude_and_prefixes_reported_env() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let mut session_ref = crate::agent_resume::AgentSessionRef::id("claude-session").unwrap();
+        session_ref.env = std::collections::BTreeMap::from([(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/tmp/claude-home".to_string(),
+        )]);
+        terminal.set_hook_authority_with_session_ref(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            Some(session_ref),
+            None,
+        );
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_agent_restart(
+            "req".into(),
+            AgentRestartParams {
+                target: "reviewer".into(),
+                cold: false,
+                timeout_ms: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentRestartStopped {
+            kind, args, env, ..
+        } = success.result
+        else {
+            panic!("expected agent_restart_stopped response");
+        };
+        assert_eq!(kind, "claude");
+        assert_eq!(args, vec!["--resume".to_string(), "claude-session".into()]);
+        assert_eq!(env, vec!["CLAUDE_CONFIG_DIR=/tmp/claude-home".to_string()]);
+        // Claude is a typed-/exit family and this restart is not cold.
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"/exit\r"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_restart_cold_interrupts_before_the_family_exit() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_agent_restart(
+            "req".into(),
+            AgentRestartParams {
+                target: "reviewer".into(),
+                cold: true,
+                timeout_ms: None,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentRestartStopped { .. }
+        ));
+        assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\x03/exit\r"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn agent_restart_requires_a_named_agent() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let response = app.handle_agent_restart(
+            "req".into(),
+            AgentRestartParams {
+                target: app.public_pane_id(0, pane_id).unwrap(),
+                cold: false,
+                timeout_ms: None,
+            },
+        );
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "agent_name_required");
+        assert!(
+            rx.try_recv().is_err(),
+            "restart wrote input for an unnamed agent"
+        );
     }
 
     #[test]
