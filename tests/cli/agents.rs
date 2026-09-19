@@ -1384,6 +1384,309 @@ fn agent_wait_pins_the_original_terminal_when_name_is_reused() {
     cleanup_spawned_herdr(herdr, base);
 }
 
+fn write_fake_claude(base: &Path, report_session: bool) -> (PathBuf, PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = base.join("bin");
+    let fake_claude = bin.join("claude");
+    let invocations = base.join("claude-invocations");
+    let exit_times = base.join("claude-exit-times");
+    fs::create_dir_all(&bin).unwrap();
+    // The spawned server sees PATH=bin only, while the restart command for a
+    // session with reported env is typed as `env KEY=VALUE claude ...`.
+    std::os::unix::fs::symlink("/usr/bin/env", bin.join("env")).unwrap();
+    let session_report = if report_session {
+        format!(
+            "'{herdr}' pane report-agent-session \"$HERDR_PANE_ID\" --source herdr:claude --agent claude --agent-session-id claude-restart-session --env CLAUDE_CONFIG_DIR=/tmp/claude-restart-home >/dev/null\n",
+            herdr = env!("CARGO_BIN_EXE_herdr"),
+        )
+    } else {
+        String::new()
+    };
+    fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{invocations}'\nexport HERDR_AGENT=claude\n'{herdr}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-claude --agent claude --state idle >/dev/null\n{session_report}while IFS= read -r prompt; do\n  case \"$prompt\" in\n    *\"/exit\"*)\n      date +%s%3N >> '{exit_times}'\n      exit 0\n      ;;\n  esac\ndone\n",
+            invocations = invocations.display(),
+            herdr = env!("CARGO_BIN_EXE_herdr"),
+            session_report = session_report,
+            exit_times = exit_times.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+    (bin, invocations, exit_times)
+}
+
+#[test]
+fn agent_restart_resumes_the_reported_session_in_the_same_pane() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let (bin, invocations, _exit_times) = write_fake_claude(&base, true);
+    let herdr = spawn_herdr_with_path(&config_home, &runtime_dir, &socket_path, Some(&bin));
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let terminal_id = created["result"]["root_pane"]["terminal_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let started = run_cli_json(
+        &socket_path,
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "claude",
+            "--pane",
+            &pane_id,
+            "--timeout",
+            "10000",
+        ],
+    );
+    assert_eq!(started["result"]["agent"]["terminal_id"], terminal_id);
+    assert_eq!(fs::read_to_string(&invocations).unwrap(), "\n");
+
+    let restarted = run_cli_json(
+        &socket_path,
+        &["agent", "restart", "worker", "--timeout", "10000"],
+    );
+    assert_eq!(restarted["result"]["type"], "agent_restarted");
+    assert_eq!(restarted["result"]["kind"], "claude");
+    assert_eq!(restarted["result"]["agent"]["name"], "worker");
+    assert_eq!(restarted["result"]["agent"]["terminal_id"], terminal_id);
+    assert_eq!(
+        restarted["result"]["argv"],
+        serde_json::json!([
+            "env",
+            "CLAUDE_CONFIG_DIR=/tmp/claude-restart-home",
+            "claude",
+            "--resume",
+            "claude-restart-session"
+        ])
+    );
+    assert!(
+        restarted["result"]["agent"]["interactive_ready"]
+            .as_bool()
+            .unwrap_or(false),
+        "restart handshake should end with a ready agent: {restarted}"
+    );
+    assert_eq!(
+        fs::read_to_string(&invocations).unwrap(),
+        "\n--resume\nclaude-restart-session\n"
+    );
+
+    let agent = run_cli_json(&socket_path, &["agent", "get", "worker"]);
+    assert_eq!(agent["result"]["agent"]["agent"], "claude");
+    assert_eq!(agent["result"]["agent"]["name"], "worker");
+    assert_eq!(agent["result"]["agent"]["pane_id"], pane_id);
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn agent_restart_cold_restarts_the_same_kind_without_a_session() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin = base.join("bin");
+    let fake_opencode = bin.join("opencode");
+    let invocations = base.join("opencode-invocations");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        &fake_opencode,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{invocations}'\nexport HERDR_AGENT=opencode\n'{herdr}' pane report-agent \"$HERDR_PANE_ID\" --source custom:fake-opencode --agent opencode --state idle >/dev/null\nwhile IFS= read -r _prompt; do :; done\n",
+            invocations = invocations.display(),
+            herdr = env!("CARGO_BIN_EXE_herdr"),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_opencode, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let herdr = spawn_herdr_with_path(&config_home, &runtime_dir, &socket_path, Some(&bin));
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let started = run_cli_json(
+        &socket_path,
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "opencode",
+            "--pane",
+            &pane_id,
+            "--timeout",
+            "10000",
+        ],
+    );
+    assert_eq!(started["result"]["type"], "agent_started");
+    assert_eq!(fs::read_to_string(&invocations).unwrap(), "\n");
+
+    let restarted = run_cli_json(
+        &socket_path,
+        &["agent", "restart", "worker", "--cold", "--timeout", "10000"],
+    );
+    assert_eq!(restarted["result"]["type"], "agent_restarted");
+    assert_eq!(restarted["result"]["kind"], "opencode");
+    assert_eq!(restarted["result"]["argv"], serde_json::json!(["opencode"]));
+
+    let agent = run_cli_json(&socket_path, &["agent", "get", "worker"]);
+    assert_eq!(agent["result"]["agent"]["agent"], "opencode");
+    assert_eq!(agent["result"]["agent"]["name"], "worker");
+    assert_eq!(agent["result"]["agent"]["pane_id"], pane_id);
+    assert_eq!(fs::read_to_string(&invocations).unwrap(), "\n\n");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn agent_restart_waits_for_a_working_agent_to_settle() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    // No reported session here: an official session report gives its source
+    // hook authority over the pane and later custom-source state reports are
+    // rejected as same-owner conflicts, which would wedge the fake at idle.
+    let (bin, invocations, exit_times) = write_fake_claude(&base, false);
+    let herdr = spawn_herdr_with_path(&config_home, &runtime_dir, &socket_path, Some(&bin));
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let started = run_cli_json(
+        &socket_path,
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "claude",
+            "--pane",
+            &pane_id,
+            "--timeout",
+            "10000",
+        ],
+    );
+    assert_eq!(started["result"]["type"], "agent_started");
+    assert!(run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-agent",
+            &pane_id,
+            "--source",
+            "custom:fake-claude",
+            "--agent",
+            "claude",
+            "--state",
+            "working",
+        ],
+    )
+    .status
+    .success());
+
+    let restart_socket = socket_path.clone();
+    let restarter = thread::spawn(move || {
+        run_cli(
+            &restart_socket,
+            &["agent", "restart", "worker", "--timeout", "10000"],
+        )
+    });
+    thread::sleep(Duration::from_millis(700));
+    assert!(
+        !exit_times.exists(),
+        "restart interrupted the working agent instead of waiting for it to settle"
+    );
+    assert!(run_cli(
+        &socket_path,
+        &[
+            "pane",
+            "report-agent",
+            &pane_id,
+            "--source",
+            "custom:fake-claude",
+            "--agent",
+            "claude",
+            "--state",
+            "idle",
+        ],
+    )
+    .status
+    .success());
+
+    let restarted = restarter.join().unwrap();
+    assert!(
+        restarted.status.success(),
+        "restart failed: {}",
+        String::from_utf8_lossy(&restarted.stderr)
+    );
+    let restarted: serde_json::Value = serde_json::from_slice(&restarted.stdout).unwrap();
+    assert_eq!(restarted["result"]["type"], "agent_restarted");
+    assert_eq!(restarted["result"]["argv"], serde_json::json!(["claude"]));
+    assert_eq!(fs::read_to_string(&invocations).unwrap(), "\n\n");
+    assert!(
+        exit_times.exists(),
+        "the stopped agent never observed its /exit"
+    );
+
+    let agent = run_cli_json(&socket_path, &["agent", "get", "worker"]);
+    assert_eq!(agent["result"]["agent"]["agent"], "claude");
+    assert_eq!(agent["result"]["agent"]["name"], "worker");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
+#[test]
+fn agent_restart_of_an_unknown_name_errors() {
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let herdr = spawn_herdr(&config_home, &runtime_dir, &socket_path);
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+
+    let restarted = run_cli(&socket_path, &["agent", "restart", "ghost"]);
+    assert_eq!(restarted.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&restarted.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "agent_not_found");
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
 #[test]
 fn agent_wait_ignores_other_panes_and_errors_when_its_pane_closes() {
     let base = unique_test_dir();
