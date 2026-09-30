@@ -77,6 +77,23 @@ if agent_session_id:
         params["agent_session_path"] = agent_session_path
     if session_start_source:
         params["session_start_source"] = session_start_source
+    # The server drops the whole session report when resume_argv fails
+    # validation, so mirror its rules over the full argv: no apostrophes,
+    # no control characters in any reported value.
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        resume_argv = [
+            "env",
+            f"CLAUDE_CONFIG_DIR={config_dir}",
+            "claude",
+            "--resume",
+            agent_session_id,
+        ]
+        if (
+            sum(len(part) for part in resume_argv) <= 8192
+            and all("'" not in part and part.isprintable() for part in resume_argv)
+        ):
+            params["resume_argv"] = resume_argv
     request = {
         "id": request_id,
         "method": "pane.report_agent_session",

@@ -1,10 +1,19 @@
 use super::harness::*;
 
 fn run_claude_hook(action: &str, hook_input: &str) -> Option<serde_json::Value> {
-    run_shell_hook(
+    run_claude_hook_with_env(action, hook_input, &[])
+}
+
+fn run_claude_hook_with_env(
+    action: &str,
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Option<serde_json::Value> {
+    run_shell_hook_with_env(
         "src/integration/assets/claude/herdr-agent-state.sh",
         &[action],
         hook_input,
+        envs,
     )
 }
 
@@ -94,6 +103,7 @@ fn run_shell_hook_with_env(
         .env("HERDR_PANE_ID", "p_test")
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CURSOR_VERSION")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -158,6 +168,48 @@ fn claude_hook_reports_session_id_from_stdin() {
     assert_eq!(request["method"], "pane.report_agent_session");
     assert_eq!(request["params"]["agent_session_id"], "claude-session");
     assert!(request["params"].get("state").is_none());
+    assert!(
+        request["params"].get("resume_argv").is_none(),
+        "no config dir means no self-reported resume command"
+    );
+}
+
+#[test]
+fn claude_hook_reports_env_scoped_resume_argv_with_config_dir() {
+    let request = run_claude_hook_with_env(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"claude-session"}"#,
+        &[("CLAUDE_CONFIG_DIR", "/tmp/zai-config")],
+    )
+    .expect("session start should report session identity");
+
+    assert_eq!(
+        request["params"]["resume_argv"],
+        serde_json::json!([
+            "env",
+            "CLAUDE_CONFIG_DIR=/tmp/zai-config",
+            "claude",
+            "--resume",
+            "claude-session"
+        ]),
+        "the reported resume must reopen the session in its config dir"
+    );
+}
+
+#[test]
+fn claude_hook_omits_resume_argv_when_the_config_dir_cannot_be_reported() {
+    let request = run_claude_hook_with_env(
+        "session",
+        r#"{"hook_event_name":"SessionStart","session_id":"claude-session"}"#,
+        &[("CLAUDE_CONFIG_DIR", "/tmp/can't-config")],
+    )
+    .expect("session start should report session identity");
+
+    assert_eq!(request["params"]["agent_session_id"], "claude-session");
+    assert!(
+        request["params"].get("resume_argv").is_none(),
+        "an unreportable config dir must not void the session report"
+    );
 }
 
 #[test]
