@@ -103,12 +103,6 @@ fn agent_restart_request_round_trips() {
                 agent: "claude".into(),
                 kind: crate::agent_resume::AgentSessionRefKind::Id,
                 value: "session-1".into(),
-                env: [(
-                    "CLAUDE_CONFIG_DIR".to_string(),
-                    "/tmp/claude-home".to_string(),
-                )]
-                .into_iter()
-                .collect(),
             }),
         }),
     };
