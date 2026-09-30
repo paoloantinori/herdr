@@ -107,7 +107,6 @@ pub enum ResponseResult {
         kind: String,
         pane_id: String,
         args: Vec<String>,
-        env: Vec<String>,
     },
     AgentRestarted {
         agent: AgentInfo,

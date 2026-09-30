@@ -270,8 +270,9 @@ impl App {
             .as_ref()
             .or(captured_session.as_ref())
             .filter(|session| crate::detect::parse_agent_label(&session.agent) == Some(kind));
-        // The relaunch reuses the resume planner so a restarted session is
-        // typed exactly as a deferred restore would type it.
+        // The relaunch reuses the built-in resume planner. Deferred restore
+        // prefers a hook-reported resume command when one exists; typing that
+        // reported command on restart is the tracked typed-resume follow-up.
         let resume_plan = session.and_then(|session| {
             crate::agent_resume::plan(
                 &session.source,
@@ -279,7 +280,6 @@ impl App {
                 &crate::agent_resume::AgentSessionRef {
                     kind: session.kind,
                     value: session.value.clone(),
-                    env: session.env.clone(),
                 },
             )
         });
@@ -287,7 +287,6 @@ impl App {
             .as_ref()
             .map(|plan| plan.argv[1..].to_vec())
             .unwrap_or_default();
-        let env = restart_env_entries(resume_plan.as_ref());
 
         let runtime = self
             .lookup_runtime_sender(resolved.ws_idx, resolved.pane_id)
@@ -308,7 +307,6 @@ impl App {
             name,
             kind: kind_label,
             args,
-            env,
         })
     }
 
@@ -583,26 +581,6 @@ fn available_shell_name(runtime: &crate::terminal::TerminalRuntime) -> Option<St
 }
 
 #[cfg(unix)]
-fn restart_env_entries(plan: Option<&crate::agent_resume::AgentResumePlan>) -> Vec<String> {
-    plan.map(|plan| {
-        plan.env
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-// start_agent refuses non-empty env on Windows (pane shells have no env(1)),
-// and by relaunch time the stop phase has already killed the agent. Degrade
-// to an env-less relaunch the way deferred resume does
-// (agent_resume::shell_command_from_resume_plan) instead of stranding the
-// pane with no agent at all.
-#[cfg(windows)]
-fn restart_env_entries(_plan: Option<&crate::agent_resume::AgentResumePlan>) -> Vec<String> {
-    Vec::new()
-}
-
 pub(super) fn runtime_hosts_agent(
     runtime: &crate::terminal::TerminalRuntime,
     expected: crate::detect::Agent,
@@ -645,7 +623,6 @@ pub(super) struct AgentRestartOutcome {
     pub name: String,
     pub kind: String,
     pub args: Vec<String>,
-    pub env: Vec<String>,
 }
 
 pub(super) enum AgentRestartError {

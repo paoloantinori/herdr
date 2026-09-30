@@ -76,7 +76,6 @@ impl App {
                     name: outcome.name,
                     kind: outcome.kind,
                     args: outcome.args,
-                    env: outcome.env,
                 },
             ),
             Err(err) => encode_error_body(id, self.agent_restart_error_body(err)),
@@ -825,7 +824,6 @@ mod tests {
             kind,
             pane_id: restart_pane_id,
             args,
-            env,
         } = success.result
         else {
             panic!("expected agent_restart_stopped response");
@@ -837,7 +835,6 @@ mod tests {
             args.is_empty(),
             "no session means a plain restart: {args:?}"
         );
-        assert!(env.is_empty());
         assert_eq!(agent.name.as_deref(), Some("reviewer"));
         // OpenCode is not a typed-/exit family, so the exit is a C-c interrupt.
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"\x03"));
@@ -845,7 +842,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_restart_types_the_exit_for_claude_and_prefixes_reported_env() {
+    async fn agent_restart_types_the_exit_for_claude_and_reuses_the_resume_args() {
         let mut app = app_with_agent();
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
@@ -854,11 +851,7 @@ mod tests {
         let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
         terminal.set_agent_name("reviewer".into());
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
-        let mut session_ref = crate::agent_resume::AgentSessionRef::id("claude-session").unwrap();
-        session_ref.env = std::collections::BTreeMap::from([(
-            "CLAUDE_CONFIG_DIR".to_string(),
-            "/tmp/claude-home".to_string(),
-        )]);
+        let session_ref = crate::agent_resume::AgentSessionRef::id("claude-session").unwrap();
         terminal.set_hook_authority_with_session_ref(
             "herdr:claude".into(),
             "claude".into(),
@@ -880,15 +873,11 @@ mod tests {
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
-        let ResponseResult::AgentRestartStopped {
-            kind, args, env, ..
-        } = success.result
-        else {
+        let ResponseResult::AgentRestartStopped { kind, args, .. } = success.result else {
             panic!("expected agent_restart_stopped response");
         };
         assert_eq!(kind, "claude");
         assert_eq!(args, vec!["--resume".to_string(), "claude-session".into()]);
-        assert_eq!(env, vec!["CLAUDE_CONFIG_DIR=/tmp/claude-home".to_string()]);
         // Claude is a typed-/exit family and this restart is not cold.
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"/exit\r"));
         assert!(rx.try_recv().is_err());

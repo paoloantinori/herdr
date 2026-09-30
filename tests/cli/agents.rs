@@ -1392,12 +1392,9 @@ fn write_fake_claude(base: &Path, report_session: bool) -> (PathBuf, PathBuf, Pa
     let invocations = base.join("claude-invocations");
     let exit_times = base.join("claude-exit-times");
     fs::create_dir_all(&bin).unwrap();
-    // The spawned server sees PATH=bin only, while the restart command for a
-    // session with reported env is typed as `env KEY=VALUE claude ...`.
-    std::os::unix::fs::symlink("/usr/bin/env", bin.join("env")).unwrap();
     let session_report = if report_session {
         format!(
-            "'{herdr}' pane report-agent-session \"$HERDR_PANE_ID\" --source herdr:claude --agent claude --agent-session-id claude-restart-session --env CLAUDE_CONFIG_DIR=/tmp/claude-restart-home >/dev/null\n",
+            "'{herdr}' pane report-agent-session \"$HERDR_PANE_ID\" --source herdr:claude --agent claude --agent-session-id claude-restart-session -- env CLAUDE_CONFIG_DIR=/tmp/claude-restart-home claude --resume claude-restart-session >/dev/null\n",
             herdr = env!("CARGO_BIN_EXE_herdr"),
         )
     } else {
@@ -1465,15 +1462,12 @@ fn agent_restart_resumes_the_reported_session_in_the_same_pane() {
     assert_eq!(restarted["result"]["kind"], "claude");
     assert_eq!(restarted["result"]["agent"]["name"], "worker");
     assert_eq!(restarted["result"]["agent"]["terminal_id"], terminal_id);
+    // Upstream removed agent-start env entries, so the relaunch uses the
+    // built-in resume argv; typing a hook-reported resume command on restart
+    // is tracked as the typed-resume relaunch follow-up.
     assert_eq!(
         restarted["result"]["argv"],
-        serde_json::json!([
-            "env",
-            "CLAUDE_CONFIG_DIR=/tmp/claude-restart-home",
-            "claude",
-            "--resume",
-            "claude-restart-session"
-        ])
+        serde_json::json!(["claude", "--resume", "claude-restart-session"])
     );
     assert!(
         restarted["result"]["agent"]["interactive_ready"]
@@ -1710,15 +1704,12 @@ fn agent_restart_by_pane_id_resolves_and_restarts_the_named_agent() {
     assert_eq!(restarted["result"]["type"], "agent_restarted");
     assert_eq!(restarted["result"]["kind"], "claude");
     assert_eq!(restarted["result"]["agent"]["name"], "worker");
+    // Upstream removed agent-start env entries, so the relaunch uses the
+    // built-in resume argv; typing a hook-reported resume command on restart
+    // is tracked as the typed-resume relaunch follow-up.
     assert_eq!(
         restarted["result"]["argv"],
-        serde_json::json!([
-            "env",
-            "CLAUDE_CONFIG_DIR=/tmp/claude-restart-home",
-            "claude",
-            "--resume",
-            "claude-restart-session"
-        ])
+        serde_json::json!(["claude", "--resume", "claude-restart-session"])
     );
     assert_eq!(
         fs::read_to_string(&invocations).unwrap(),

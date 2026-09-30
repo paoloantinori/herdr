@@ -275,7 +275,6 @@ pub(super) fn restart_agent(
         kind,
         pane_id,
         args,
-        env,
     } = stop.result
     else {
         return restart_error(
@@ -326,7 +325,6 @@ pub(super) fn restart_agent(
             kind: kind.clone(),
             pane_id: pane_id.clone(),
             args,
-            env,
             timeout_ms: remaining_timeout_ms(Some(timeout_ms), started_at),
         }),
     };
