@@ -1392,9 +1392,10 @@ impl TerminalState {
             (
                 "herdr:claude",
                 "claude",
-                // Keep in sync with SESSION_START_MATCHER in
-                // integration/claude_settings.rs, which subscribes the
-                // SessionStart hook to fork sources.
+                // Every source allowed here must appear in
+                // SESSION_START_MATCHER (integration/claude_settings.rs)
+                // or the hook never fires for it; the matcher may carry
+                // extra sources this arm must refuse, such as startup.
                 Some("clear" | "resume" | "compact" | "fork")
             ) | (
                 "herdr:codex",
@@ -4818,7 +4819,7 @@ mod tests {
 
     #[test]
     fn claude_lifecycle_session_ref_replaces_existing_session_ref() {
-        for session_start_source in ["clear", "resume", "compact"] {
+        for session_start_source in ["clear", "resume", "compact", "fork"] {
             let mut terminal = test_terminal();
             terminal
                 .set_agent_session_ref(
@@ -5613,7 +5614,6 @@ mod tests {
             agent: "claude".into(),
             session_ref: crate::agent_resume::AgentSessionRef::id("old-session").unwrap(),
         });
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
 
         let mutation = terminal.set_agent_session_ref_for_session_start(
             "herdr:claude".into(),
@@ -5623,13 +5623,14 @@ mod tests {
             Some("fork".into()),
         );
 
-        assert!(mutation.is_some());
+        assert!(mutation.is_some_and(|mutation| mutation.session_ref_changed));
         assert_eq!(
-            terminal
-                .persisted_agent_session
-                .as_ref()
-                .map(|session| session.session_ref.value.as_str()),
-            Some("forked-session")
+            terminal.persisted_agent_session.as_ref().map(|session| (
+                session.source.as_str(),
+                session.agent.as_str(),
+                session.session_ref.value.as_str()
+            )),
+            Some(("herdr:claude", "claude", "forked-session"))
         );
     }
 
