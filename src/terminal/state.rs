@@ -1392,7 +1392,10 @@ impl TerminalState {
             (
                 "herdr:claude",
                 "claude",
-                Some("clear" | "resume" | "compact")
+                // Keep in sync with SESSION_START_MATCHER in
+                // integration/claude_settings.rs, which subscribes the
+                // SessionStart hook to fork sources.
+                Some("clear" | "resume" | "compact" | "fork")
             ) | (
                 "herdr:codex",
                 "codex",
