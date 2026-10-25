@@ -5603,6 +5603,34 @@ mod tests {
     }
 
     #[test]
+    fn claude_fork_session_report_replaces_same_owner_session_ref() {
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("old-session").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let mutation = terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("forked-session"),
+            Some(21),
+            Some("fork".into()),
+        );
+
+        assert!(mutation.is_some());
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("forked-session")
+        );
+    }
+
+    #[test]
     fn foreground_agent_session_replaces_stale_different_owner_hook_authority() {
         let mut terminal = test_terminal();
         let now = std::time::Instant::now();
