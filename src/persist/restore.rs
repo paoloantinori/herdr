@@ -606,7 +606,8 @@ fn restore_tab(
                 (Some(agent_name), Some(agent)) => {
                     terminal.restore_managed_agent(agent_name, agent)
                 }
-                (Some(_), None) => {}
+                // This pane owns the resumed session, so its saved agent name stays addressable.
+                (Some(agent_name), None) => terminal.set_agent_name(agent_name),
                 (None, _) => {}
             }
             if let Some(agent) = initial_restore_agent {
@@ -706,8 +707,8 @@ fn restore_tab(
                     (Some(agent_name), Some(agent)) if was_imported => {
                         terminal.restore_managed_agent(agent_name, agent)
                     }
-                    (Some(_), Some(_)) => {}
                     (Some(agent_name), None) if was_imported => terminal.set_agent_name(agent_name),
+                    (Some(_), Some(_)) => {}
                     (Some(_), None) => {}
                     (None, _) => {}
                 }

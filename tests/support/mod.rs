@@ -135,6 +135,24 @@ pub fn wait_for_file(path: &Path, timeout: Duration) {
     panic!("file did not appear at {}", path.display());
 }
 
+pub fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut last_text = String::new();
+    while Instant::now() < deadline {
+        if let Ok(text) = fs::read_to_string(path) {
+            last_text = text;
+            if last_text.contains(needle) {
+                return last_text;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "{} did not contain {needle:?}; last text was {last_text:?}",
+        path.display()
+    );
+}
+
 fn encode_varint_u32(v: u32) -> Vec<u8> {
     if v < 251 {
         vec![v as u8]

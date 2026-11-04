@@ -396,28 +396,10 @@ fn wait_for_output(socket_path: &Path, pane_id: &str, needle: &str) {
     );
 }
 
-fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
-    let deadline = Instant::now() + timeout;
-    let mut last_text = String::new();
-    while Instant::now() < deadline {
-        if let Ok(text) = fs::read_to_string(path) {
-            last_text = text;
-            if last_text.contains(needle) {
-                return last_text;
-            }
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    panic!(
-        "{} did not contain {needle:?}; last text was {last_text:?}",
-        path.display()
-    );
-}
-
 fn wait_for_pid_marker(path: &Path, timeout: Duration) -> u32 {
     // Shell redirection creates the file before echo writes the PID. Wait for
     // the newline too, so a partially written PID cannot be accepted.
-    let text = wait_for_file_contains(path, "\n", timeout);
+    let text = support::wait_for_file_contains(path, "\n", timeout);
     text.lines()
         .next()
         .and_then(|line| line.split_whitespace().last())
@@ -1130,7 +1112,7 @@ fn live_handoff_preserves_pane_process_io() {
             "params": {"pane_id": pane_id, "text": "after-handoff", "keys": ["Enter"]}
         }),
     ));
-    wait_for_file_contains(
+    support::wait_for_file_contains(
         &received_marker,
         "got:after-handoff",
         Duration::from_secs(5),
@@ -1144,7 +1126,7 @@ fn live_handoff_preserves_pane_process_io() {
             "params": {"pane_id": second_pane_id, "text": "after-handoff-second", "keys": ["Enter"]}
         }),
     ));
-    wait_for_file_contains(
+    support::wait_for_file_contains(
         &second_received_marker,
         "second:after-handoff-second",
         Duration::from_secs(5),
@@ -1262,7 +1244,7 @@ pathlib.Path({received:?}).write_text(data.hex())
         .expect("client shell should receive restored state before sending input");
     send_client_shell_shift_enter(&mut client_stream, &pane_id).unwrap();
 
-    wait_for_file_contains(&received_marker, "1b5b31333b3275", Duration::from_secs(5));
+    support::wait_for_file_contains(&received_marker, "1b5b31333b3275", Duration::from_secs(5));
 
     let _ = request(
         &api_socket,
@@ -1358,7 +1340,7 @@ pathlib.Path({received:?}).write_text(data.hex())
         .expect("client shell should receive restored state before sending input");
     send_client_shell_shift_enter(&mut client_stream, &pane_id).unwrap();
 
-    wait_for_file_contains(
+    support::wait_for_file_contains(
         &received_marker,
         "1b5b32373b323b31337e",
         Duration::from_secs(5),
@@ -1404,7 +1386,8 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
             "params": {"pane_id": pane_id, "text": format!("printf '%s' \"$HERDR_PANE_ID\" > {}", pane_id_marker.display()), "keys": ["Enter"]}
         }),
     ));
-    let old_pane_id = wait_for_file_contains(&pane_id_marker, &pane_id, Duration::from_secs(5));
+    let old_pane_id =
+        support::wait_for_file_contains(&pane_id_marker, &pane_id, Duration::from_secs(5));
     assert!(
         old_pane_id == pane_id,
         "unexpected pane id from env: {old_pane_id:?}"
@@ -2019,7 +2002,7 @@ fn live_handoff_bad_expected_protocol_rolls_back_old_server() {
             "params": {"pane_id": pane_id, "text": "after-failed-handoff", "keys": ["Enter"]}
         }),
     ));
-    wait_for_file_contains(
+    support::wait_for_file_contains(
         &received_marker,
         "got:after-failed-handoff",
         Duration::from_secs(5),
@@ -2100,7 +2083,7 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
             "params": {"pane_id": pane_id, "text": failure_point, "keys": ["Enter"]}
         }),
     ));
-    wait_for_file_contains(
+    support::wait_for_file_contains(
         &received_marker,
         &format!("got:{failure_point}"),
         Duration::from_secs(5),
