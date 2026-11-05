@@ -199,7 +199,7 @@ fn lookup_agent(name: &str) -> Option<Agent> {
     let name = path_basename(name);
     match name {
         "pi" => Some(Agent::Pi),
-        "claude" | "claude-code" => Some(Agent::Claude),
+        "claude" | "claude-code" | "zai" => Some(Agent::Claude),
         "codex" => Some(Agent::Codex),
         "gemini" => Some(Agent::Gemini),
         "cursor" | "cursor-agent" => Some(Agent::Cursor),

@@ -322,7 +322,7 @@ pub(super) fn restart_agent(
         id: format!("{request_id}:start"),
         method: Method::AgentStart(crate::api::schema::AgentStartParams {
             name: name.clone(),
-            kind: kind.clone(),
+            kind: Some(kind.clone()),
             pane_id: pane_id.clone(),
             args,
             timeout_ms: remaining_timeout_ms(Some(timeout_ms), started_at),

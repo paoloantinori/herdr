@@ -1412,7 +1412,10 @@
               "type": "array"
             },
             "kind": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "name": {
               "type": "string"
@@ -1432,7 +1435,6 @@
           },
           "required": [
             "name",
-            "kind",
             "pane_id"
           ],
           "type": "object"

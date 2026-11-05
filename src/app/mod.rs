@@ -2970,7 +2970,7 @@ mod tests {
             id: "req_agent_start_target".into(),
             method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
                 name: "worker".into(),
-                kind: "pi".into(),
+                kind: Some("pi".into()),
                 pane_id,
                 args: Vec::new(),
                 timeout_ms: Some(1_000),
@@ -3012,7 +3012,7 @@ mod tests {
             id: "req_agent_start_input".into(),
             method: crate::api::schema::Method::AgentStart(crate::api::schema::AgentStartParams {
                 name: "worker".into(),
-                kind: "codex".into(),
+                kind: Some("codex".into()),
                 pane_id: pane_id.clone(),
                 args: vec!["resume".into(), "codex-session".into()],
                 timeout_ms: Some(4_000),

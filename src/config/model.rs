@@ -308,6 +308,27 @@ pub fn validated_sidebar_bounds(min: u16, max: u16) -> Option<(u16, u16)> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// Default agent kind for auto-starts (`herdr agent start` without an
+    /// explicit --kind, and any other path that needs a kind).
+    /// Defaults to "claude".
+    pub default_kind: String,
+    /// Executable overrides per agent kind: kind label -> command.
+    /// Example: claude = "/home/you/.local/bin/zai"
+    pub executable_overrides: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            default_kind: "claude".to_string(),
+            executable_overrides: Default::default(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -323,6 +344,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub agents: AgentsConfig,
 }
 
 #[derive(Debug)]

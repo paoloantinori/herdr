@@ -336,16 +336,15 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
-    let Some(kind) = kind else {
-        eprintln!("missing required --kind");
-        return Ok(2);
-    };
+    // --kind e' opzionale: quando manca, il server applica [agents].default_kind
+    // (la config decide l'agente di default: fleet = zai, incident 2026-11-05).
     let Some(pane_id) = pane_id else {
         eprintln!("missing required --pane");
         return Ok(2);
     };
-    let Some(expected_kind) = crate::detect::parse_agent_label(&kind) else {
-        eprintln!("unsupported interactive agent kind: {kind}");
+    let expected_kind_label = kind.unwrap_or_default();
+    let Some(expected_kind) = crate::detect::parse_agent_label(&expected_kind_label) else {
+        eprintln!("unsupported interactive agent kind: {expected_kind_label}");
         return Ok(2);
     };
     let expected_kind = crate::detect::agent_label(expected_kind).to_string();
@@ -375,7 +374,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             id: "cli:agent:start".into(),
             method: Method::AgentStart(AgentStartParams {
                 name: name.clone(),
-                kind: kind.clone(),
+                kind: Some(expected_kind_label.clone()),
                 pane_id: pane_id.clone(),
                 args: agent_args.clone(),
                 timeout_ms,

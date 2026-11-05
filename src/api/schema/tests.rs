@@ -136,7 +136,7 @@ fn agent_start_and_prompt_requests_round_trip() {
         id: "start".into(),
         method: Method::AgentStart(AgentStartParams {
             name: "reviewer".into(),
-            kind: "pi".into(),
+            kind: Some("pi".into()),
             pane_id: "w1:p2".into(),
             args: vec!["--no-session".into()],
             timeout_ms: Some(30_000),

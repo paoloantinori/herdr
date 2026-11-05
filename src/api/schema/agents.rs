@@ -166,7 +166,7 @@ pub enum AgentViewSortOrder {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentStartParams {
     pub name: String,
-    pub kind: String,
+    pub kind: Option<String>,
     pub pane_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,

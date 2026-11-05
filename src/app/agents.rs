@@ -153,8 +153,18 @@ impl App {
         if !valid_agent_name(&name) {
             return Err(AgentStartError::InvalidName);
         }
-        let Some(kind) = crate::detect::parse_agent_label(&params.kind) else {
-            return Err(AgentStartError::UnsupportedKind(params.kind));
+        let resolved_kind = match params.kind.as_deref().map(str::trim) {
+            Some(kind) if !kind.is_empty() => kind.to_string(),
+            // config default ([agents].default_kind): every auto-start path
+            // must produce the deployment's agent, not a hardcoded one
+            _ => crate::config::Config::load()
+                .config
+                .agents
+                .default_kind
+                .clone(),
+        };
+        let Some(kind) = crate::detect::parse_agent_label(&resolved_kind) else {
+            return Err(AgentStartError::UnsupportedKind(resolved_kind));
         };
         if params
             .args
@@ -197,7 +207,19 @@ impl App {
         let shell_name = available_shell_name(runtime)
             .ok_or_else(|| AgentStartError::TargetBusy(params.pane_id.clone()))?;
 
-        let mut argv = vec![crate::detect::interactive_agent_executable(kind).to_string()];
+        // Executable override per kind from config ([agents].executable_overrides):
+        // lets a deployment redirect a stock kind to its own launcher
+        // (fleet: claude -> the zai wrapper, incident 2026-11-05).
+        let overrides = crate::config::Config::load()
+            .config
+            .agents
+            .executable_overrides;
+        let label = crate::detect::agent_label(kind);
+        let executable = overrides
+            .get(label)
+            .cloned()
+            .unwrap_or_else(|| crate::detect::interactive_agent_executable(kind).to_string());
+        let mut argv = vec![executable];
         argv.extend(params.args);
         let command = crate::platform::interactive_shell_command(&argv, &shell_name)
             .ok_or(AgentStartError::InvalidArgument)?;
