@@ -176,9 +176,11 @@ pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
 }
 
 /// Munge a project cwd the way Claude Code munges it for its projects
-/// store: path separators become '-' (leading separator included).
+/// store: path separators AND dots become '-' (verified against a live
+/// store 2026-11-07: `.claude/worktrees/x` munges to
+/// `-claude--worktrees-x`; windows drive colons munge the same way).
 pub fn munge_project_dir(cwd: &Path) -> String {
-    cwd.to_string_lossy().replace(['/', '\\'], "-")
+    cwd.to_string_lossy().replace(['/', '\\', '.', ':'], "-")
 }
 
 /// Extract a CLAUDE_CONFIG_DIR=... value from a resume argv (the fork's
@@ -216,7 +218,32 @@ pub fn claude_session_id_from_argv(argv: &[String]) -> Option<String> {
 ///               different project dir.
 /// None        = cannot tell (transcript not found in this store); callers
 ///               keep today's accept behavior for that case.
-pub fn claude_session_project_matches(
+/// A session belongs to a project when its transcript lives under the
+/// projects-store directory munged from the pane's cwd. Claude Code
+/// stores transcripts at
+/// `<config_dir>/projects/<munged-project-dir>/<session>.jsonl`, so the
+/// comparison needs no filesystem access and no un-munging guess: the
+/// munge is deterministic and the transcript PATH is reported by the
+/// agent's own hook. A session that belongs to a DIFFERENT project must
+/// never attach to (or resume in) this pane: the 2026-11-07 mis-resume
+/// had the anti-vocale pane run the beryl session because nothing
+/// compared the two identities.
+///
+/// Some(true)  = transcript under this cwd's munged project dir.
+/// Some(false) = transcript under a different project dir.
+/// None        = no transcript path reported: unverifiable, callers keep
+///               today's accept behavior.
+pub fn claude_session_project_matches(cwd: &Path, transcript_path: Option<&Path>) -> Option<bool> {
+    let transcript = transcript_path?;
+    let project_dir = transcript.parent()?.file_name()?;
+    Some(project_dir == std::ffi::OsStr::new(&munge_project_dir(cwd)))
+}
+
+/// Single-probe variant for launch-time checks that only hold a resume
+/// argv (no reported transcript path): locates the transcript under the
+/// argv's CLAUDE_CONFIG_DIR (defaulting to ~/.claude, the store an argv
+/// without the env prefix runs under) and applies the same verdict.
+pub fn claude_session_project_matches_argv(
     cwd: &Path,
     config_dir: Option<&Path>,
     session_id: &str,
@@ -226,8 +253,7 @@ pub fn claude_session_project_matches(
     }
     let config_dir = config_dir
         .map(Path::to_path_buf)
-        .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
-        .or_else(|| home_claude_config_dir())?;
+        .or_else(home_claude_config_dir)?;
     let projects = config_dir.join("projects");
     let file_name = format!("{session_id}.jsonl");
     if projects
@@ -442,24 +468,10 @@ fn valid_session_path(value: &str) -> bool {
 #[cfg(test)]
 mod task87_project_match_tests {
     use super::{
-        claude_session_id_from_argv, claude_session_project_matches, config_dir_from_resume_argv,
-        munge_project_dir,
+        claude_session_id_from_argv, claude_session_project_matches,
+        claude_session_project_matches_argv, config_dir_from_resume_argv, munge_project_dir,
     };
     use std::path::Path;
-
-    fn unique_projects_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "herdr-task87-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(dir.join("projects")).unwrap();
-        dir
-    }
 
     #[test]
     fn munge_replaces_separators() {
@@ -492,77 +504,77 @@ mod task87_project_match_tests {
     }
 
     #[test]
-    fn session_in_pane_project_is_some_true() {
-        let root = unique_projects_dir("true");
+    fn transcript_under_pane_project_is_some_true() {
         let cwd = Path::new("/Users/pantinor/data/repo/personal/anti-vocale");
-        let dir = root.join("projects").join(munge_project_dir(cwd));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("sess-ok.jsonl"), "{}").unwrap();
+        let transcript = Path::new(
+            "/Users/pantinor/.cc-mirror/zai/config/projects/-Users-pantinor-data-repo-personal-anti-vocale/sess-ok.jsonl");
         assert_eq!(
-            claude_session_project_matches(cwd, Some(&root), "sess-ok"),
+            claude_session_project_matches(cwd, Some(transcript)),
             Some(true)
         );
     }
 
     #[test]
-    fn session_in_other_project_is_some_false() {
-        let root = unique_projects_dir("false");
-        let beryl_cwd = Path::new("/Users/pantinor/data/repo/personal/beryl-mac");
-        let av_cwd = Path::new("/Users/pantinor/data/repo/personal/anti-vocale");
-        let dir = root.join("projects").join(munge_project_dir(beryl_cwd));
+    fn dotted_cwd_munges_like_the_live_store() {
+        // 2026-11-07 review: CC munges '.' too; the cookies-extractor
+        // worktree is a real store entry with the double dash.
+        let cwd = Path::new(
+            "/home/pantinor/data/repo/personal/cookies-extractor/.claude/worktrees/chrome-local-adb");
+        let transcript = Path::new(
+            "/home/pantinor/.claude/projects/-home-pantinor-data-repo-personal-cookies-extractor--claude-worktrees-chrome-local-adb/sess.jsonl");
+        assert_eq!(
+            claude_session_project_matches(cwd, Some(transcript)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_incident_shape_is_some_false() {
+        // beryl transcript reported from the anti-vocale pane
+        let cwd = Path::new("/Users/pantinor/data/repo/personal/anti-vocale");
+        let transcript = Path::new(
+            "/Users/pantinor/.cc-mirror/zai/config/projects/-Users-pantinor-data-repo-personal-beryl-mac/f8059af6-70d7-40bf-8a7d-7c39a0139e8b.jsonl");
+        assert_eq!(
+            claude_session_project_matches(cwd, Some(transcript)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn no_transcript_path_is_unverifiable() {
+        assert_eq!(
+            claude_session_project_matches(Path::new("/tmp"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn argv_variant_single_probe_verdicts() {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-task87-argv-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let beryl = Path::new("/Users/pantinor/data/repo/personal/beryl-mac");
+        let av = Path::new("/Users/pantinor/data/repo/personal/anti-vocale");
+        let dir = root.join("projects").join(munge_project_dir(beryl));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("f8059af6.jsonl"), "{}").unwrap();
-        // the exact incident shape: beryl session against the av pane
         assert_eq!(
-            claude_session_project_matches(av_cwd, Some(&root), "f8059af6"),
+            claude_session_project_matches_argv(av, Some(&root), "f8059af6"),
             Some(false)
         );
         assert_eq!(
-            claude_session_project_matches(beryl_cwd, Some(&root), "f8059af6"),
+            claude_session_project_matches_argv(beryl, Some(&root), "f8059af6"),
             Some(true)
         );
-    }
-
-    #[test]
-    fn missing_transcript_is_unverifiable() {
-        let root = unique_projects_dir("none");
         assert_eq!(
-            claude_session_project_matches(Path::new("/tmp"), Some(&root), "not-there"),
+            claude_session_project_matches_argv(av, Some(&root), "not-anywhere"),
             None
         );
-        assert_eq!(
-            claude_session_project_matches(Path::new("/tmp"), Some(&root), "bad id!"),
-            None
-        );
-    }
-
-    #[test]
-    fn config_dir_env_fallback_used() {
-        let root = unique_projects_dir("envfallback");
-        let cwd = Path::new("/tmp/task87-env");
-        std::fs::create_dir_all(root.join("projects").join(munge_project_dir(cwd))).unwrap();
-        std::fs::write(
-            root.join("projects")
-                .join(munge_project_dir(cwd))
-                .join("envsid.jsonl"),
-            "{}",
-        )
-        .unwrap();
-        let prev = std::env::var("CLAUDE_CONFIG_DIR").ok();
-        // SAFETY: single-threaded nextest unit; env var restored below.
-        unsafe {
-            std::env::set_var("CLAUDE_CONFIG_DIR", &root);
-        }
-        let verdict = claude_session_project_matches(cwd, None, "envsid");
-        match prev {
-            Some(v) => unsafe {
-                std::env::set_var("CLAUDE_CONFIG_DIR", v);
-            },
-            None => unsafe {
-                std::env::remove_var("CLAUDE_CONFIG_DIR");
-            },
-        }
-        assert_eq!(verdict, Some(true));
     }
 }
 

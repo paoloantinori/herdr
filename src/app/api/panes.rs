@@ -1568,6 +1568,11 @@ impl App {
         let report_is_newer = self
             .pane_terminal(ws_idx, pane_id)
             .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        // capture before the move: the guard below needs it
+        let reported_transcript_path = params
+            .agent_session_path
+            .as_deref()
+            .map(std::path::PathBuf::from);
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1582,23 +1587,22 @@ impl App {
             if agent_label == "claude"
                 && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
             {
-                let config_dir = crate::agent_resume::config_dir_from_resume_argv(
-                    params.resume_argv.as_deref().unwrap_or_default(),
-                );
+                // the hook reports its own transcript path: the project
+                // identity comparison needs no filesystem scan and no
+                // server-env guessing (2026-11-07 review)
+                let transcript_path = reported_transcript_path.as_deref();
                 let terminal_cwd = self
                     .pane_terminal(ws_idx, pane_id)
                     .map(|terminal| terminal.cwd.clone());
                 if let Some(cwd) = terminal_cwd {
-                    match crate::agent_resume::claude_session_project_matches(
-                        &cwd,
-                        config_dir.as_deref(),
-                        &session_ref.value,
-                    ) {
+                    match crate::agent_resume::claude_session_project_matches(&cwd, transcript_path)
+                    {
                         Some(false) => {
                             tracing::warn!(
                                 pane = pane_id.raw(),
                                 session = %session_ref.value,
                                 pane_cwd = %cwd.display(),
+                                transcript = ?transcript_path,
                                 "agent_session_report rejected: session belongs to a different project than the pane (TASK-87)"
                             );
                             return encode_error(
@@ -1659,6 +1663,11 @@ impl App {
         let report_is_newer = self
             .pane_terminal(ws_idx, pane_id)
             .is_some_and(|terminal| terminal.hook_report_is_newer(&params.source, params.seq));
+        // capture before the move: the guard below needs it
+        let reported_transcript_path = params
+            .agent_session_path
+            .as_deref()
+            .map(std::path::PathBuf::from);
         let session_ref = crate::agent_resume::session_ref_from_report(
             &params.source,
             &agent_label,
@@ -1673,23 +1682,22 @@ impl App {
             if agent_label == "claude"
                 && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
             {
-                let config_dir = crate::agent_resume::config_dir_from_resume_argv(
-                    params.resume_argv.as_deref().unwrap_or_default(),
-                );
+                // the hook reports its own transcript path: the project
+                // identity comparison needs no filesystem scan and no
+                // server-env guessing (2026-11-07 review)
+                let transcript_path = reported_transcript_path.as_deref();
                 let terminal_cwd = self
                     .pane_terminal(ws_idx, pane_id)
                     .map(|terminal| terminal.cwd.clone());
                 if let Some(cwd) = terminal_cwd {
-                    match crate::agent_resume::claude_session_project_matches(
-                        &cwd,
-                        config_dir.as_deref(),
-                        &session_ref.value,
-                    ) {
+                    match crate::agent_resume::claude_session_project_matches(&cwd, transcript_path)
+                    {
                         Some(false) => {
                             tracing::warn!(
                                 pane = pane_id.raw(),
                                 session = %session_ref.value,
                                 pane_cwd = %cwd.display(),
+                                transcript = ?transcript_path,
                                 "agent_session_report rejected: session belongs to a different project than the pane (TASK-87)"
                             );
                             return encode_error(

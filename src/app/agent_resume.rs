@@ -268,7 +268,7 @@ impl App {
         if plan.agent == "claude" {
             if let Some(session_id) = crate::agent_resume::claude_session_id_from_argv(&plan.argv) {
                 let config_dir = crate::agent_resume::config_dir_from_resume_argv(&plan.argv);
-                if crate::agent_resume::claude_session_project_matches(
+                if crate::agent_resume::claude_session_project_matches_argv(
                     &cwd,
                     config_dir.as_deref(),
                     &session_id,
