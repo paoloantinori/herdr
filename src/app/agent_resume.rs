@@ -263,6 +263,37 @@ impl App {
             return true;
         }
 
+        // TASK-87 (2026-11-07 mis-resume): never launch a resume whose
+        // session provably belongs to a different project than the pane.
+        if plan.agent == "claude" {
+            if let Some(session_id) = crate::agent_resume::claude_session_id_from_argv(&plan.argv) {
+                let config_dir = crate::agent_resume::config_dir_from_resume_argv(&plan.argv);
+                if crate::agent_resume::claude_session_project_matches(
+                    &cwd,
+                    config_dir.as_deref(),
+                    &session_id,
+                ) == Some(false)
+                {
+                    tracing::warn!(
+                        pane = pane_id.raw(),
+                        terminal = %terminal_id,
+                        session = %session_id,
+                        pane_cwd = %cwd.display(),
+                        "dropping deferred agent resume: the session belongs to a different project than the pane (TASK-87)"
+                    );
+                    if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                        terminal.pending_agent_resume_plan = None;
+                        terminal.restore_error = Some(
+                            "Deferred resume refused: the saved session belongs to a different project dir than this pane (TASK-87).".into(),
+                        );
+                        terminal.revision = terminal.revision.saturating_add(1);
+                    }
+                    self.schedule_session_save();
+                    return true;
+                }
+            }
+        }
+
         let runtime = match crate::terminal::TerminalRuntime::spawn(
             pane_id,
             rows,

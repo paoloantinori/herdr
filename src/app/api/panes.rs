@@ -1574,6 +1574,52 @@ impl App {
             params.agent_session_id,
             params.agent_session_path,
         );
+        // TASK-87 (2026-11-07 mis-resume): a session must never rebind to a
+        // pane of a different project. The hook knows its cwd; compare it
+        // with the transcript location the session provably lives in. An
+        // unverifiable pair keeps the pre-fix accept behavior.
+        if let Some(session_ref) = session_ref.as_ref() {
+            if agent_label == "claude"
+                && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+            {
+                let config_dir = crate::agent_resume::config_dir_from_resume_argv(
+                    params.resume_argv.as_deref().unwrap_or_default(),
+                );
+                let terminal_cwd = self
+                    .pane_terminal(ws_idx, pane_id)
+                    .map(|terminal| terminal.cwd.clone());
+                if let Some(cwd) = terminal_cwd {
+                    match crate::agent_resume::claude_session_project_matches(
+                        &cwd,
+                        config_dir.as_deref(),
+                        &session_ref.value,
+                    ) {
+                        Some(false) => {
+                            tracing::warn!(
+                                pane = pane_id.raw(),
+                                session = %session_ref.value,
+                                pane_cwd = %cwd.display(),
+                                "agent_session_report rejected: session belongs to a different project than the pane (TASK-87)"
+                            );
+                            return encode_error(
+                                id,
+                                "session_project_mismatch",
+                                "the reported session belongs to a different project dir than this pane; refusing the rebind (TASK-87)",
+                            );
+                        }
+                        accepted => {
+                            tracing::info!(
+                                pane = pane_id.raw(),
+                                session = %session_ref.value,
+                                pane_cwd = %cwd.display(),
+                                verdict = ?accepted,
+                                "agent_session_report rebind evaluated (TASK-87)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         self.handle_internal_event(crate::events::AppEvent::HookStateReported {
             pane_id,
             session_ref: session_ref.clone(),
@@ -1619,6 +1665,52 @@ impl App {
             params.agent_session_id,
             params.agent_session_path,
         );
+        // TASK-87 (2026-11-07 mis-resume): a session must never rebind to a
+        // pane of a different project. The hook knows its cwd; compare it
+        // with the transcript location the session provably lives in. An
+        // unverifiable pair keeps the pre-fix accept behavior.
+        if let Some(session_ref) = session_ref.as_ref() {
+            if agent_label == "claude"
+                && session_ref.kind == crate::agent_resume::AgentSessionRefKind::Id
+            {
+                let config_dir = crate::agent_resume::config_dir_from_resume_argv(
+                    params.resume_argv.as_deref().unwrap_or_default(),
+                );
+                let terminal_cwd = self
+                    .pane_terminal(ws_idx, pane_id)
+                    .map(|terminal| terminal.cwd.clone());
+                if let Some(cwd) = terminal_cwd {
+                    match crate::agent_resume::claude_session_project_matches(
+                        &cwd,
+                        config_dir.as_deref(),
+                        &session_ref.value,
+                    ) {
+                        Some(false) => {
+                            tracing::warn!(
+                                pane = pane_id.raw(),
+                                session = %session_ref.value,
+                                pane_cwd = %cwd.display(),
+                                "agent_session_report rejected: session belongs to a different project than the pane (TASK-87)"
+                            );
+                            return encode_error(
+                                id,
+                                "session_project_mismatch",
+                                "the reported session belongs to a different project dir than this pane; refusing the rebind (TASK-87)",
+                            );
+                        }
+                        accepted => {
+                            tracing::info!(
+                                pane = pane_id.raw(),
+                                session = %session_ref.value,
+                                pane_cwd = %cwd.display(),
+                                verdict = ?accepted,
+                                "agent_session_report rebind evaluated (TASK-87)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         self.handle_internal_event(crate::events::AppEvent::AgentSessionReported {
             pane_id,
             session_ref: session_ref.clone(),
