@@ -175,11 +175,18 @@ pub fn is_reserved_native_state_source(source: &str, agent: &str) -> bool {
     )
 }
 
-/// Munge a project cwd the way Claude Code munges it for its projects
-/// store: path separators AND dots become '-' (verified against a live
-/// store 2026-11-07: `.claude/worktrees/x` munges to
-/// `-claude--worktrees-x`; windows drive colons munge the same way).
+/// Munge a project cwd the way the CURRENT Claude Code munges it for
+/// its projects store: separators, dots, underscores and drive colons
+/// become '-' (2026-11-07 live-store evidence: backup_routers munges
+/// to -backup-routers; .claude/worktrees munges to --claude-worktrees).
+/// Older stores kept underscores (alexa-proactive_events): the
+/// claude_session_project_matches helpers accept both spellings.
 pub fn munge_project_dir(cwd: &Path) -> String {
+    cwd.to_string_lossy()
+        .replace(['/', '\\', '.', ':', '_'], "-")
+}
+
+fn legacy_munge_project_dir(cwd: &Path) -> String {
     cwd.to_string_lossy().replace(['/', '\\', '.', ':'], "-")
 }
 
@@ -260,6 +267,10 @@ pub fn claude_session_project_matches_argv(
         .join(munge_project_dir(cwd))
         .join(&file_name)
         .exists()
+        || projects
+            .join(legacy_munge_project_dir(cwd))
+            .join(&file_name)
+            .exists()
     {
         return Some(true);
     }
@@ -478,6 +489,24 @@ mod task87_project_match_tests {
         assert_eq!(
             munge_project_dir(Path::new("/Users/pantinor/data/repo/personal/beryl-mac")),
             "-Users-pantinor-data-repo-personal-beryl-mac"
+        );
+    }
+
+    #[test]
+    fn underscore_cwd_matches_dash_store_dir() {
+        // 2026-11-08: backup_routers false-refused without the
+        // underscore rule; legacy stores keep the underscore spelling,
+        // and both variants are accepted.
+        let cwd = Path::new("/home/pantinor/data/repo/personal/backup_routers");
+        assert_eq!(
+            munge_project_dir(cwd),
+            "-home-pantinor-data-repo-personal-backup-routers"
+        );
+        let transcript = Path::new(
+            "/home/pantinor/.cc-mirror/zai/config/projects/-home-pantinor-data-repo-personal-backup-routers/a58825ec.jsonl");
+        assert_eq!(
+            claude_session_project_matches(cwd, Some(transcript)),
+            Some(true)
         );
     }
 
