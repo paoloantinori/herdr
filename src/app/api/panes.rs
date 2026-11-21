@@ -1591,9 +1591,18 @@ impl App {
                 // identity comparison needs no filesystem scan and no
                 // server-env guessing (2026-11-07 review)
                 let transcript_path = reported_transcript_path.as_deref();
-                let terminal_cwd = self
-                    .pane_terminal(ws_idx, pane_id)
-                    .map(|terminal| terminal.cwd.clone());
+                // LIVE cwd first (TASK-87 round 2, 2026-11-21 camel
+                // session): a pane launched from a foreign shell keeps
+                // its static terminal.cwd there forever, while the
+                // session legitimately works in the transcript's own
+                // project; the foreground process cwd is the project
+                // the pane is actually in. Static cwd is the fallback
+                // (and stays authoritative for the beryl mis-resume,
+                // where both fields named the wrong project).
+                let terminal_cwd = self.pane_foreground_cwd(ws_idx, pane_id).or_else(|| {
+                    self.pane_terminal(ws_idx, pane_id)
+                        .map(|terminal| terminal.cwd.clone())
+                });
                 if let Some(cwd) = terminal_cwd {
                     match crate::agent_resume::claude_session_project_matches(&cwd, transcript_path)
                     {
@@ -1686,9 +1695,18 @@ impl App {
                 // identity comparison needs no filesystem scan and no
                 // server-env guessing (2026-11-07 review)
                 let transcript_path = reported_transcript_path.as_deref();
-                let terminal_cwd = self
-                    .pane_terminal(ws_idx, pane_id)
-                    .map(|terminal| terminal.cwd.clone());
+                // LIVE cwd first (TASK-87 round 2, 2026-11-21 camel
+                // session): a pane launched from a foreign shell keeps
+                // its static terminal.cwd there forever, while the
+                // session legitimately works in the transcript's own
+                // project; the foreground process cwd is the project
+                // the pane is actually in. Static cwd is the fallback
+                // (and stays authoritative for the beryl mis-resume,
+                // where both fields named the wrong project).
+                let terminal_cwd = self.pane_foreground_cwd(ws_idx, pane_id).or_else(|| {
+                    self.pane_terminal(ws_idx, pane_id)
+                        .map(|terminal| terminal.cwd.clone())
+                });
                 if let Some(cwd) = terminal_cwd {
                     match crate::agent_resume::claude_session_project_matches(&cwd, transcript_path)
                     {
@@ -1754,6 +1772,19 @@ impl App {
             self.pane_terminal(ws_idx, pane_id)
                 .is_some_and(|terminal| terminal.session_ref_is_current(session_ref))
         })
+    }
+
+    fn pane_foreground_cwd(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<std::path::PathBuf> {
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let tab = workspace
+            .tabs
+            .iter()
+            .find(|t| t.panes.contains_key(&pane_id))?;
+        tab.foreground_cwd_for_pane(pane_id, &self.terminal_runtimes)
     }
 
     fn pane_terminal(
